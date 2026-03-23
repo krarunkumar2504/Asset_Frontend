@@ -36,7 +36,7 @@ import { createPortal } from "react-dom";
 import axios from "axios";
 
 const api = axios.create({
-  baseURL: "https://asset-management-system.onrender.com",
+  baseURL: "https://assest-management-system.onrender.com/",
   headers: { "Content-Type": "application/json", Accept: "application/json" },
   timeout: 8000,
 });

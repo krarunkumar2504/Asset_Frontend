@@ -50,7 +50,7 @@ import axios from "axios";
 // AXIOS INSTANCE (unchanged)
 // ─────────────────────────────────────────────────────────────
 const api = axios.create({
-  baseURL: "https://asset-management-system.onrender.com",
+  baseURL: "https://assest-management-system.onrender.com/",
   headers: { "Content-Type": "application/json" },
   timeout: 8000,
 });
