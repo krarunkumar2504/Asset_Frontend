@@ -1,95 +1,207 @@
 // ─────────────────────────────────────────────────────────────
-// Dashboard.jsx — Asset Name Fix in Notifications
+// Dashboard.jsx — Mobile Notification Fix + Global Toast System
 //
-// CHANGE: buildNotifications now accepts assetMap (id → name).
-// resolveNotifAssetName resolves overdue record names as:
-//   1. record.assetName   — if backend provides it
-//   2. assetMap[assetId]  — looked up from fetched assets
-//   3. "Asset #<id>"      — only last resort
-// assetMap is built in the root Dashboard component and passed in.
-// All other logic unchanged.
+// 1. MOBILE NOTIFICATION FIX  (search "// MOBILE NOTIF FIX")
+//    Old: right = window.innerWidth - anchorRect.right  → clips on phones
+//    Fix: screens < 480px → left:12, right:12 (full-width gutter)
+//         screens ≥ 480px → original anchor-relative positioning
+//
+// 2. GLOBAL TOAST SYSTEM  (search "// TOAST")
+//    ToastProvider wraps the app — useToast() hook fires from anywhere.
+//    4 types: success ✅ | error ❌ | warning ⚠️ | info ℹ️
+//    Each toast: icon, bold title, message, animated countdown bar.
+//    Slide-in from right (desktop) / slide-up from bottom (mobile).
+//    Auto-dismiss: success/info 4s, warning 5s, error 6s.
+//    Stacks up to 4, FIFO overflow. Manual ✕ close.
+//    Fires on: data load success, data load error, AI success, AI error, logout.
+//
+// ALL OTHER LOGIC — UNCHANGED
 // ─────────────────────────────────────────────────────────────
 
-import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, createContext, useContext } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { createPortal } from "react-dom";
 import axios from "axios";
 
 const api = axios.create({
-  baseURL: "https://assest-management-system.onrender.com/",              
+  baseURL: "https://assest-management-system.onrender.com/",
   headers: { "Content-Type": "application/json", Accept: "application/json" },
   timeout: 10000,
 });
 
 const NAV_ITEMS = [
-  { label: "Dashboard",   icon: "▪",  path: "/dashboard"   },
-  { label: "Assets",      icon: "📦", path: "/assets"      },
-  { label: "Maintenance", icon: "🔧", path: "/maintenance" },
-  { label: "Reports",     icon: "📊", path: "/reports"     },
+  { label: "Dashboard",   icon: "\u25aa",  path: "/dashboard"   },
+  { label: "Assets",      icon: "\ud83d\udce6", path: "/assets"      },
+  { label: "Maintenance", icon: "\ud83d\udd27", path: "/maintenance" },
+  { label: "Reports",     icon: "\ud83d\udcca", path: "/reports"     },
 ];
-const ADMIN_NAV_ITEM = { label: "Create Employee", icon: "👤", path: "/create-employee" };
+const ADMIN_NAV_ITEM = { label: "Create Employee", icon: "\ud83d\udc64", path: "/create-employee" };
 
+// ─── Helpers ────────────────────────────────────────────────
 function parseCost(val) { if (val == null) return 0; return Number(String(val).replace(/[^0-9.]/g, "")) || 0; }
-function fmtValue(n) { if (!n) return "$0"; if (n >= 1_000_000) return `$${(n/1_000_000).toFixed(1)}M`; if (n >= 1_000) return `$${(n/1_000).toFixed(0)}K`; return `$${n.toLocaleString("en-US")}`; }
+function fmtValue(n) { if (!n) return "$0"; if (n >= 1e6) return `$${(n/1e6).toFixed(1)}M`; if (n >= 1e3) return `$${(n/1e3).toFixed(0)}K`; return `$${n.toLocaleString("en-US")}`; }
 function getStoredUser() { try { return JSON.parse(localStorage.getItem("user")) ?? {}; } catch { return {}; } }
-function getDisplayName(user) { if (user.employeeName?.trim()) return user.employeeName.trim(); if (user.name?.trim()) return user.name.trim(); if (user.email?.trim()) return user.email.split("@")[0]; return "User"; }
-function getUserInitials(user) { return getDisplayName(user).split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2) || "U"; }
-function deriveStatus(dt) { if (!dt) return "Completed"; const diff = (new Date(dt) - new Date()) / 86400000; return diff < 0 ? "Overdue" : diff <= 60 ? "Pending" : "Completed"; }
-function getDashboardLabel(user) { const role = (user.role ?? "").trim(); if (!role) return "Dashboard"; return `${role} Dashboard`; }
+function getDisplayName(u) { if (u.employeeName?.trim()) return u.employeeName.trim(); if (u.name?.trim()) return u.name.trim(); if (u.email?.trim()) return u.email.split("@")[0]; return "User"; }
+function getUserInitials(u) { return getDisplayName(u).split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2)||"U"; }
+function deriveStatus(dt) { if (!dt) return "Completed"; const d=(new Date(dt)-new Date())/86400000; return d<0?"Overdue":d<=60?"Pending":"Completed"; }
+function getDashboardLabel(u) { const r=(u.role??"").trim(); return r?`${r} Dashboard`:"Dashboard"; }
 
-// ASSET NAME FIX: resolves real name for notification messages
-function resolveNotifAssetName(record, assetMap) {
-  if (record.assetName && record.assetName.trim()) return record.assetName.trim();
-  if (record.assetId   && assetMap[record.assetId]) return assetMap[record.assetId];
-  return `Asset #${record.assetId ?? "?"}`;
+function resolveNotifAssetName(rec, map) {
+  if (rec.assetName?.trim()) return rec.assetName.trim();
+  if (rec.assetId && map[rec.assetId]) return map[rec.assetId];
+  return `Asset #${rec.assetId??"?"}`;
 }
 
-// ASSET NAME FIX: assetMap accepted as third arg
-function buildNotifications(assets, maintenance, assetMap = {}) {
-  const notes = [];
-  maintenance.filter((r) => deriveStatus(r.nextDueDate) === "Overdue").slice(0, 3).forEach((r) => {
-    notes.push({
-      id: `overdue-${r.id}`, type: "critical", icon: "🚨",
-      title:   "Overdue Maintenance",
-      // ASSET NAME FIX: real name, not "Asset #1"
-      message: `${resolveNotifAssetName(r, assetMap)} — due on ${r.nextDueDate ?? "unknown date"}`,
-      time: "Overdue",
-    });
+function buildNotifications(assets, maint, assetMap={}) {
+  const n=[];
+  maint.filter(r=>deriveStatus(r.nextDueDate)==="Overdue").slice(0,3).forEach(r=>{
+    n.push({id:`ov-${r.id}`,type:"critical",icon:"\ud83d\udea8",title:"Overdue Maintenance",message:`${resolveNotifAssetName(r,assetMap)} \u2014 due on ${r.nextDueDate??"unknown date"}`,time:"Overdue"});
   });
-  assets.filter((a) => (a.status ?? "").toLowerCase() === "maintenance").slice(0, 2).forEach((a) => {
-    notes.push({ id: `maint-${a.id}`, type: "warning", icon: "🔧", title: "Asset Under Maintenance", message: `${a.assetName ?? "Unknown asset"} is currently under maintenance`, time: "Active" });
+  assets.filter(a=>(a.status??"").toLowerCase()==="maintenance").slice(0,2).forEach(a=>{
+    n.push({id:`mt-${a.id}`,type:"warning",icon:"\ud83d\udd27",title:"Asset Under Maintenance",message:`${a.assetName??"Unknown asset"} is currently under maintenance`,time:"Active"});
   });
-  const pending = maintenance.filter((r) => deriveStatus(r.nextDueDate) === "Pending");
-  if (pending.length > 0) notes.push({ id: "pending-summary", type: "info", icon: "⏳", title: "Upcoming Maintenance", message: `${pending.length} task${pending.length > 1 ? "s" : ""} due within 60 days`, time: "Upcoming" });
-  const inactive = assets.filter((a) => (a.status ?? "").toLowerCase() === "inactive");
-  if (inactive.length > 0) notes.push({ id: "inactive-summary", type: "info", icon: "📦", title: "Inactive Assets", message: `${inactive.length} asset${inactive.length > 1 ? "s are" : " is"} inactive`, time: "Review" });
-  notes.push({ id: "system", type: "info", icon: "✅", title: "System Status", message: "All systems operational — data synced", time: "Now" });
-  return notes;
+  const p=maint.filter(r=>deriveStatus(r.nextDueDate)==="Pending");
+  if(p.length>0) n.push({id:"pend",type:"info",icon:"\u23f3",title:"Upcoming Maintenance",message:`${p.length} task${p.length>1?"s":""} due within 60 days`,time:"Upcoming"});
+  const i=assets.filter(a=>(a.status??"").toLowerCase()==="inactive");
+  if(i.length>0) n.push({id:"inact",type:"info",icon:"\ud83d\udce6",title:"Inactive Assets",message:`${i.length} asset${i.length>1?"s are":" is"} inactive`,time:"Review"});
+  n.push({id:"sys",type:"info",icon:"\u2705",title:"System Status",message:"All systems operational \u2014 data synced",time:"Now"});
+  return n;
 }
 
+// ═══════════════════════════════════════════════════════════
+// TOAST SYSTEM
+// ═══════════════════════════════════════════════════════════
+const ToastCtx = createContext(null);
+export function useToast() { return useContext(ToastCtx); }
+
+const T_CFG = {
+  success:{ icon:"\u2705", bar:"linear-gradient(90deg,#10b981,#34d399)", border:"rgba(16,185,129,.3)", bg:"rgba(16,185,129,.07)", titleC:"#064e3b", msgC:"#065f46", iconBg:"rgba(16,185,129,.13)", dur:4000 },
+  error:  { icon:"\u274c", bar:"linear-gradient(90deg,#ef4444,#f87171)", border:"rgba(239,68,68,.3)",  bg:"rgba(239,68,68,.07)",  titleC:"#7f1d1d", msgC:"#991b1b", iconBg:"rgba(239,68,68,.12)",  dur:6000 },
+  warning:{ icon:"\u26a0\ufe0f", bar:"linear-gradient(90deg,#f59e0b,#fcd34d)", border:"rgba(245,158,11,.3)", bg:"rgba(245,158,11,.07)", titleC:"#78350f", msgC:"#92400e", iconBg:"rgba(245,158,11,.12)", dur:5000 },
+  info:   { icon:"\u2139\ufe0f", bar:"linear-gradient(90deg,#4f46e5,#818cf8)", border:"rgba(79,70,229,.3)",  bg:"rgba(79,70,229,.07)",  titleC:"#1e1b4b", msgC:"#3730a3", iconBg:"rgba(79,70,229,.12)",  dur:4000 },
+};
+
+function ToastCard({ t, remove }) {
+  const c = T_CFG[t.type] ?? T_CFG.info;
+  const [vis, setVis] = useState(false);
+  const [w,   setW]   = useState(100);
+  const iv = useRef(null);
+
+  useEffect(() => { const id=setTimeout(()=>setVis(true),10); return ()=>clearTimeout(id); }, []);
+
+  useEffect(() => {
+    const step = 100/(c.dur/50);
+    iv.current = setInterval(() => setW(p => { if(p<=0){clearInterval(iv.current);return 0;} return p-step; }), 50);
+    return () => clearInterval(iv.current);
+  }, [c.dur]);
+
+  useEffect(() => { if(w<=0) close(); }, [w]);
+
+  const close = () => { setVis(false); setTimeout(()=>remove(t.id),350); };
+
+  const isMob = typeof window!=="undefined" && window.innerWidth<640;
+
+  return (
+    <div style={{
+      transform: vis?(isMob?"translateY(0) scale(1)":"translateX(0) scale(1)"):(isMob?"translateY(100%) scale(0.95)":"translateX(110%) scale(0.95)"),
+      opacity: vis?1:0,
+      transition:"transform 0.35s cubic-bezier(.34,1.56,.64,1),opacity 0.35s ease",
+      background:"#fff", border:`1px solid ${c.border}`, borderRadius:16, overflow:"hidden",
+      boxShadow:`0 8px 32px rgba(0,0,0,.12),0 0 0 1px ${c.border}`,
+      maxWidth:360, width:"100%", pointerEvents:"auto",
+    }}>
+      <div style={{display:"flex",alignItems:"flex-start",gap:12,padding:"14px 14px 12px",background:c.bg}}>
+        <div style={{width:36,height:36,borderRadius:10,background:c.iconBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{c.icon}</div>
+        <div style={{flex:1,minWidth:0}}>
+          <p style={{fontSize:13,fontWeight:700,color:c.titleC,marginBottom:2,lineHeight:1.3}}>{t.title}</p>
+          {t.message && <p style={{fontSize:12,color:c.msgC,lineHeight:1.5,margin:0}}>{t.message}</p>}
+        </div>
+        <button onClick={close}
+          style={{width:24,height:24,borderRadius:8,border:"none",background:"rgba(0,0,0,.06)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,color:"#64748b",flexShrink:0}}
+          onMouseEnter={e=>e.currentTarget.style.background="rgba(0,0,0,.12)"}
+          onMouseLeave={e=>e.currentTarget.style.background="rgba(0,0,0,.06)"}>
+          \u2715
+        </button>
+      </div>
+      <div style={{height:3,background:"rgba(0,0,0,.06)"}}>
+        <div style={{height:"100%",width:`${w}%`,background:c.bar,transition:"width .05s linear"}}/>
+      </div>
+    </div>
+  );
+}
+
+function ToastContainer({ toasts, remove }) {
+  const mob = typeof window!=="undefined" && window.innerWidth<640;
+  return createPortal(
+    <div style={{position:"fixed",zIndex:99999,pointerEvents:"none",display:"flex",flexDirection:"column",gap:10,
+      ...(mob?{bottom:16,left:12,right:12,alignItems:"stretch"}:{top:72,right:16,width:360,alignItems:"flex-end"})
+    }}>
+      {toasts.map(t=><ToastCard key={t.id} t={t} remove={remove}/>)}
+    </div>,
+    document.body
+  );
+}
+
+function ToastProvider({ children }) {
+  const [toasts,setToasts]=useState([]);
+  const add=useCallback((type,title,message)=>{
+    const id=Date.now()+Math.random();
+    setToasts(p=>{const n=[...p,{id,type,title,message}]; return n.length>4?n.slice(-4):n;});
+  },[]);
+  const remove=useCallback(id=>setToasts(p=>p.filter(t=>t.id!==id)),[]);
+  const toast=useMemo(()=>({
+    success:(t,m)=>add("success",t,m),
+    error:  (t,m)=>add("error",t,m),
+    warning:(t,m)=>add("warning",t,m),
+    info:   (t,m)=>add("info",t,m),
+  }),[add]);
+  return (
+    <ToastCtx.Provider value={{toast}}>
+      {children}
+      <ToastContainer toasts={toasts} remove={remove}/>
+    </ToastCtx.Provider>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// NOTIFICATION DROPDOWN — MOBILE NOTIF FIX
+// ═══════════════════════════════════════════════════════════
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
-  const TYPE_STYLE = {
-    critical: { iconBg: "bg-red-100",    dot: "bg-red-500",    title: "text-red-700"    },
-    warning:  { iconBg: "bg-amber-100",  dot: "bg-amber-500",  title: "text-amber-700"  },
-    info:     { iconBg: "bg-indigo-100", dot: "bg-indigo-400", title: "text-indigo-700" },
+  const TS={
+    critical:{iconBg:"bg-red-100",   dot:"bg-red-500",   title:"text-red-700"},
+    warning: {iconBg:"bg-amber-100", dot:"bg-amber-500", title:"text-amber-700"},
+    info:    {iconBg:"bg-indigo-100",dot:"bg-indigo-400",title:"text-indigo-700"},
   };
-  const style = { position: "fixed", top: (anchorRect?.bottom ?? 60) + 8, right: anchorRect ? window.innerWidth - anchorRect.right : 16, width: 320, zIndex: 9999, background: "#fff", borderRadius: 16, overflow: "hidden", boxShadow: "0 24px 60px rgba(79,70,229,0.22), 0 4px 16px rgba(0,0,0,0.12)", border: "1px solid rgba(79,70,229,0.1)" };
+
+  // MOBILE NOTIF FIX: < 480px → full-width with gutters; ≥ 480px → anchor-relative
+  const small = typeof window!=="undefined" && window.innerWidth < 480;
+  const style = small
+    ? { position:"fixed", top:(anchorRect?.bottom??60)+8, left:12, right:12,
+        zIndex:9999, background:"#fff", borderRadius:16, overflow:"hidden",
+        boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)",
+        border:"1px solid rgba(79,70,229,.1)" }
+    : { position:"fixed", top:(anchorRect?.bottom??60)+8,
+        right: anchorRect ? window.innerWidth-anchorRect.right : 16,
+        width:320, zIndex:9999, background:"#fff", borderRadius:16, overflow:"hidden",
+        boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)",
+        border:"1px solid rgba(79,70,229,.1)" };
+
   return createPortal(
     <>
-      <div style={{ position: "fixed", inset: 0, zIndex: 9998 }} onClick={onClose} />
+      <div style={{position:"fixed",inset:0,zIndex:9998}} onClick={onClose}/>
       <div style={style}>
-        <div className="flex items-center justify-between px-4 py-3 border-b border-indigo-50" style={{ background: "linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-indigo-50" style={{background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)"}}>
           <div className="flex items-center gap-2">
             <span className="text-sm font-bold text-indigo-950">Notifications</span>
-            <span className="text-xs font-bold text-white px-1.5 py-0.5 rounded-full" style={{ background: "linear-gradient(90deg,#f43f5e,#ec4899)" }}>{notifications.length}</span>
+            <span className="text-xs font-bold text-white px-1.5 py-0.5 rounded-full" style={{background:"linear-gradient(90deg,#f43f5e,#ec4899)"}}>{notifications.length}</span>
           </div>
-          <button onClick={onClose} className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors text-sm">✕</button>
+          <button onClick={onClose} className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors text-sm">\u2715</button>
         </div>
-        <div style={{ maxHeight: 320, overflowY: "auto" }}>
-          {notifications.length === 0
+        <div style={{maxHeight:320,overflowY:"auto"}}>
+          {notifications.length===0
             ? <p className="text-xs text-slate-400 text-center py-8">No notifications</p>
-            : notifications.map((n) => {
-                const s = TYPE_STYLE[n.type] ?? TYPE_STYLE.info;
+            : notifications.map(n=>{
+                const s=TS[n.type]??TS.info;
                 return (
                   <div key={n.id} className="flex gap-3 px-4 py-3 border-b border-slate-50 hover:bg-slate-50 transition-colors cursor-default">
                     <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0 ${s.iconBg}`}>{n.icon}</div>
@@ -100,14 +212,14 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
                       </div>
                       <p className="text-xs text-slate-500 leading-relaxed">{n.message}</p>
                     </div>
-                    <span className={`w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ${s.dot}`} />
+                    <span className={`w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ${s.dot}`}/>
                   </div>
                 );
               })
           }
         </div>
         <div className="px-4 py-2.5 border-t border-indigo-50 text-center">
-          <span className="text-xs text-indigo-500 font-medium">{notifications.filter((n) => n.type === "critical").length} critical · {notifications.length} total</span>
+          <span className="text-xs text-indigo-500 font-medium">{notifications.filter(n=>n.type==="critical").length} critical \u00b7 {notifications.length} total</span>
         </div>
       </div>
     </>,
@@ -116,106 +228,90 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
 }
 
 function StatusBadge({ status }) {
-  const styles = { Active: "bg-emerald-50 text-emerald-700 border border-emerald-200", Inactive: "bg-slate-100 text-slate-500 border border-slate-200", Maintenance: "bg-amber-50 text-amber-700 border border-amber-200" };
-  const dots   = { Active: "bg-emerald-500", Inactive: "bg-slate-400", Maintenance: "bg-amber-500" };
-  return <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold ${styles[status] ?? "bg-gray-100 text-gray-600 border border-gray-200"}`}><span className={`w-1.5 h-1.5 rounded-full ${dots[status] ?? "bg-gray-400"}`} />{status ?? "Unknown"}</span>;
+  const S={Active:"bg-emerald-50 text-emerald-700 border border-emerald-200",Inactive:"bg-slate-100 text-slate-500 border border-slate-200",Maintenance:"bg-amber-50 text-amber-700 border border-amber-200"};
+  const D={Active:"bg-emerald-500",Inactive:"bg-slate-400",Maintenance:"bg-amber-500"};
+  return <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold ${S[status]??"bg-gray-100 text-gray-600 border border-gray-200"}`}><span className={`w-1.5 h-1.5 rounded-full ${D[status]??"bg-gray-400"}`}/>{status??"Unknown"}</span>;
 }
 
 function SidebarContent({ onNavigate }) {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const user     = getStoredUser();
-  const isAdmin  = user.role === "Admin";
-  const handleNav = (path) => { navigate(path); if (onNavigate) onNavigate(); };
-  const NavButton = ({ item }) => {
-    const isActive = location.pathname.startsWith(item.path);
-    return (
-      <button onClick={() => handleNav(item.path)}
-        className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative ${isActive ? "text-white" : "text-indigo-300 hover:text-indigo-100 hover:bg-white/5"}`}
-        style={isActive ? { background: "linear-gradient(90deg,rgba(99,102,241,0.5),rgba(20,184,166,0.3))", boxShadow: "0 0 20px rgba(99,102,241,0.3)" } : {}}>
-        {isActive && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full" style={{ background: "linear-gradient(180deg,#818cf8,#34d399)" }} />}
-        <span className="text-sm w-4 text-center">{item.icon}</span>
-        <span className="flex-1">{item.label}</span>
-      </button>
-    );
+  const navigate=useNavigate(), location=useLocation(), user=getStoredUser(), isAdmin=user.role==="Admin";
+  const go=(p)=>{navigate(p);if(onNavigate)onNavigate();};
+  const NavBtn=({item})=>{
+    const on=location.pathname.startsWith(item.path);
+    return <button onClick={()=>go(item.path)} className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative ${on?"text-white":"text-indigo-300 hover:text-indigo-100 hover:bg-white/5"}`} style={on?{background:"linear-gradient(90deg,rgba(99,102,241,.5),rgba(20,184,166,.3))",boxShadow:"0 0 20px rgba(99,102,241,.3)"}:{}}>
+      {on&&<span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full" style={{background:"linear-gradient(180deg,#818cf8,#34d399)"}}/>}
+      <span className="text-sm w-4 text-center">{item.icon}</span><span className="flex-1">{item.label}</span>
+    </button>;
   };
   return (
     <div className="flex flex-col h-full py-6 px-3.5">
-      <div className="flex items-center gap-2.5 px-2 mb-8 cursor-pointer" onClick={() => handleNav("/dashboard")}>
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center text-base flex-shrink-0" style={{ background: "linear-gradient(135deg,#818cf8,#34d399)" }}>⚙</div>
-        <div><div className="text-white font-bold text-base tracking-tight">AssetAI</div><div className="text-indigo-300 font-medium tracking-widest uppercase" style={{ fontSize: 9 }}>Management Suite</div></div>
+      <div className="flex items-center gap-2.5 px-2 mb-8 cursor-pointer" onClick={()=>go("/dashboard")}>
+        <div className="w-8 h-8 rounded-lg flex items-center justify-center text-base flex-shrink-0" style={{background:"linear-gradient(135deg,#818cf8,#34d399)"}}>\u2699</div>
+        <div><div className="text-white font-bold text-base tracking-tight">AssetAI</div><div className="text-indigo-300 font-medium tracking-widest uppercase" style={{fontSize:9}}>Management Suite</div></div>
       </div>
       <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mb-2">Main</p>
-      <nav className="flex flex-col gap-1">{NAV_ITEMS.map((item) => <NavButton key={item.label} item={item} />)}</nav>
-      {isAdmin && (<><p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mt-5 mb-2">Admin</p><nav className="flex flex-col gap-1"><NavButton item={ADMIN_NAV_ITEM} /></nav></>)}
+      <nav className="flex flex-col gap-1">{NAV_ITEMS.map(i=><NavBtn key={i.label} item={i}/>)}</nav>
+      {isAdmin&&<><p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mt-5 mb-2">Admin</p><nav className="flex flex-col gap-1"><NavBtn item={ADMIN_NAV_ITEM}/></nav></>}
       <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
-        <p className="text-xs font-semibold tracking-wide uppercase" style={{ color: isAdmin ? "#34d399" : "#a5b4fc" }}>{user.role ?? "Employee"}</p>
+        <p className="text-xs font-semibold tracking-wide uppercase" style={{color:isAdmin?"#34d399":"#a5b4fc"}}>{user.role??"Employee"}</p>
         <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{getDisplayName(user)}</p>
-        <p className="text-xs text-indigo-600 mt-0.5">v3.1.0 — Pro Plan</p>
+        <p className="text-xs text-indigo-600 mt-0.5">v3.1.0 \u2014 Pro Plan</p>
       </div>
     </div>
   );
 }
 
 function Sidebar({ mobileOpen, onClose }) {
-  const bg = "linear-gradient(180deg,#1e1b4b 0%,#312e81 60%,#134e4a 100%)";
+  const bg="linear-gradient(180deg,#1e1b4b 0%,#312e81 60%,#134e4a 100%)";
   return (
     <>
-      <aside className="w-52 flex-shrink-0 hidden lg:flex flex-col" style={{ background: bg }}><SidebarContent /></aside>
-      <div className={`fixed inset-0 z-40 bg-black/50 transition-opacity duration-300 lg:hidden ${mobileOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`} onClick={onClose} />
-      <aside className={`fixed top-0 left-0 z-50 h-full w-64 flex flex-col transition-transform duration-300 ease-in-out lg:hidden ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`} style={{ background: bg }}>
-        <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 rounded-lg flex items-center justify-center text-indigo-300 hover:bg-white/10 hover:text-white transition-colors text-lg z-10">✕</button>
-        <SidebarContent onNavigate={onClose} />
+      <aside className="w-52 flex-shrink-0 hidden lg:flex flex-col" style={{background:bg}}><SidebarContent/></aside>
+      <div className={`fixed inset-0 z-40 bg-black/50 transition-opacity duration-300 lg:hidden ${mobileOpen?"opacity-100 pointer-events-auto":"opacity-0 pointer-events-none"}`} onClick={onClose}/>
+      <aside className={`fixed top-0 left-0 z-50 h-full w-64 flex flex-col transition-transform duration-300 ease-in-out lg:hidden ${mobileOpen?"translate-x-0":"-translate-x-full"}`} style={{background:bg}}>
+        <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 rounded-lg flex items-center justify-center text-indigo-300 hover:bg-white/10 hover:text-white transition-colors text-lg z-10">\u2715</button>
+        <SidebarContent onNavigate={onClose}/>
       </aside>
     </>
   );
 }
 
 function Navbar({ onMenuToggle, notifications }) {
-  const navigate   = useNavigate();
-  const location   = useLocation();
-  const user       = getStoredUser();
-  const bellRef    = useRef(null);
-  const [notifOpen,  setNotifOpen]  = useState(false);
-  const [anchorRect, setAnchorRect] = useState(null);
-  const PAGE_TITLES = { "/dashboard": "Dashboard", "/assets": "Assets", "/maintenance": "Maintenance", "/reports": "Reports", "/create-employee": "Create Employee" };
-  const pageTitle      = PAGE_TITLES[location.pathname] ?? "Dashboard";
-  const dashboardLabel = getDashboardLabel(user);
-  const displayName    = getDisplayName(user);
-  const initials       = getUserInitials(user);
-  const handleBellClick = () => { if (bellRef.current) setAnchorRect(bellRef.current.getBoundingClientRect()); setNotifOpen((o) => !o); };
-  const urgentCount  = notifications.filter((n) => n.type === "critical" || n.type === "warning").length;
-  const handleLogout = () => { localStorage.removeItem("user"); navigate("/"); };
+  const navigate=useNavigate(), location=useLocation(), user=getStoredUser();
+  const {toast}=useToast();
+  const bellRef=useRef(null);
+  const [notifOpen,setNotifOpen]=useState(false);
+  const [anchorRect,setAnchorRect]=useState(null);
+  const PT={"/dashboard":"Dashboard","/assets":"Assets","/maintenance":"Maintenance","/reports":"Reports","/create-employee":"Create Employee"};
+  const pageTitle=PT[location.pathname]??"Dashboard";
+  const dashLabel=getDashboardLabel(user);
+  const dName=getDisplayName(user), ini=getUserInitials(user);
+  const handleBell=()=>{if(bellRef.current)setAnchorRect(bellRef.current.getBoundingClientRect());setNotifOpen(o=>!o);};
+  const urgent=notifications.filter(n=>n.type==="critical"||n.type==="warning").length;
+  const logout=()=>{localStorage.removeItem("user");toast.info("Signed out","You have been logged out successfully. See you next time!");setTimeout(()=>navigate("/"),600);};
   return (
-    <header className="h-14 flex items-center px-4 sm:px-6 gap-3 flex-shrink-0 border-b" style={{ background: "rgba(255,255,255,0.85)", backdropFilter: "blur(12px)", borderColor: "rgba(79,70,229,0.08)" }}>
+    <header className="h-14 flex items-center px-4 sm:px-6 gap-3 flex-shrink-0 border-b" style={{background:"rgba(255,255,255,.85)",backdropFilter:"blur(12px)",borderColor:"rgba(79,70,229,.08)"}}>
       <button onClick={onMenuToggle} className="lg:hidden w-8 h-8 rounded-lg flex items-center justify-center border border-indigo-100 bg-indigo-50/60 text-indigo-600 hover:bg-indigo-100 transition-colors flex-shrink-0">
-        <span className="flex flex-col gap-1 w-4"><span className="block h-0.5 bg-current rounded-full" /><span className="block h-0.5 bg-current rounded-full" /><span className="block h-0.5 bg-current rounded-full" /></span>
+        <span className="flex flex-col gap-1 w-4"><span className="block h-0.5 bg-current rounded-full"/><span className="block h-0.5 bg-current rounded-full"/><span className="block h-0.5 bg-current rounded-full"/></span>
       </button>
       <div className="flex-1 min-w-0">
-        <span className="text-sm font-bold text-indigo-950 hidden sm:inline">{dashboardLabel}</span>
+        <span className="text-sm font-bold text-indigo-950 hidden sm:inline">{dashLabel}</span>
         <span className="text-xs text-indigo-300 font-normal hidden sm:inline"> / {pageTitle}</span>
         <span className="text-sm font-bold text-indigo-950 sm:hidden">{pageTitle}</span>
       </div>
       <div className="hidden md:flex items-center gap-1.5 border border-indigo-100 rounded-full px-3 py-1 text-xs font-medium text-indigo-600 bg-indigo-50/80">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> All systems operational
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"/> All systems operational
       </div>
-      <button ref={bellRef} onClick={handleBellClick}
-        className={`relative w-8 h-8 rounded-lg flex items-center justify-center text-sm border transition-colors flex-shrink-0 ${notifOpen ? "bg-indigo-100 border-indigo-200" : "border-indigo-100 bg-indigo-50/60 hover:bg-indigo-100"}`}>
-        🔔
-        {notifications.length > 0 && (
-          <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full text-white flex items-center justify-center font-bold"
-            style={{ background: urgentCount > 0 ? "linear-gradient(135deg,#f43f5e,#ec4899)" : "linear-gradient(135deg,#4f46e5,#9333ea)", fontSize: 9 }}>
-            {notifications.length > 9 ? "9+" : notifications.length}
-          </span>
-        )}
+      <button ref={bellRef} onClick={handleBell} className={`relative w-8 h-8 rounded-lg flex items-center justify-center text-sm border transition-colors flex-shrink-0 ${notifOpen?"bg-indigo-100 border-indigo-200":"border-indigo-100 bg-indigo-50/60 hover:bg-indigo-100"}`}>
+        \ud83d\udd14
+        {notifications.length>0&&<span className="absolute -top-1 -right-1 w-4 h-4 rounded-full text-white flex items-center justify-center font-bold" style={{background:urgent>0?"linear-gradient(135deg,#f43f5e,#ec4899)":"linear-gradient(135deg,#4f46e5,#9333ea)",fontSize:9}}>{notifications.length>9?"9+":notifications.length}</span>}
       </button>
-      {notifOpen && <NotificationDropdown notifications={notifications} anchorRect={anchorRect} onClose={() => setNotifOpen(false)} />}
+      {notifOpen&&<NotificationDropdown notifications={notifications} anchorRect={anchorRect} onClose={()=>setNotifOpen(false)}/>}
       <div className="flex items-center gap-2 border border-indigo-100 rounded-full px-2 py-1 bg-white cursor-pointer flex-shrink-0">
-        <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold" style={{ background: "linear-gradient(135deg,#4f46e5,#14b8a6)" }}>{initials}</div>
-        <span className="text-xs font-medium text-slate-700 hidden sm:block max-w-20 truncate">{displayName.split(" ")[0]}</span>
+        <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold" style={{background:"linear-gradient(135deg,#4f46e5,#14b8a6)"}}>{ini}</div>
+        <span className="text-xs font-medium text-slate-700 hidden sm:block max-w-20 truncate">{dName.split(" ")[0]}</span>
       </div>
-      <button onClick={handleLogout} className="text-xs text-indigo-500 border border-indigo-200 bg-indigo-50 px-2 sm:px-3 py-1.5 rounded-lg hover:bg-indigo-100 font-medium transition-colors flex-shrink-0">
-        <span className="hidden sm:inline">→ Logout</span><span className="sm:hidden">→</span>
+      <button onClick={logout} className="text-xs text-indigo-500 border border-indigo-200 bg-indigo-50 px-2 sm:px-3 py-1.5 rounded-lg hover:bg-indigo-100 font-medium transition-colors flex-shrink-0">
+        <span className="hidden sm:inline">\u2192 Logout</span><span className="sm:hidden">\u2192</span>
       </button>
     </header>
   );
@@ -223,8 +319,8 @@ function Navbar({ onMenuToggle, notifications }) {
 
 function StatCard({ label, value, sub, icon, trend, trendColor, topBorder, iconBg }) {
   return (
-    <div className="bg-white rounded-2xl p-4 sm:p-5 border border-indigo-50 relative overflow-hidden hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-default" style={{ boxShadow: "0 2px 12px rgba(79,70,229,0.07)" }}>
-      <div className={`absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r ${topBorder}`} />
+    <div className="bg-white rounded-2xl p-4 sm:p-5 border border-indigo-50 relative overflow-hidden hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-default" style={{boxShadow:"0 2px 12px rgba(79,70,229,.07)"}}>
+      <div className={`absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r ${topBorder}`}/>
       <div className="flex items-start justify-between mb-3 sm:mb-4">
         <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center text-lg sm:text-xl bg-gradient-to-br ${iconBg}`}>{icon}</div>
         <span className={`text-xs font-semibold border rounded-full px-2 sm:px-2.5 py-0.5 ${trendColor}`}>{trend}</span>
@@ -238,238 +334,171 @@ function StatCard({ label, value, sub, icon, trend, trendColor, topBorder, iconB
 
 function TableRow({ asset, isEven }) {
   return (
-    <tr className={`hover:bg-indigo-50/50 transition-colors ${isEven ? "bg-slate-50/60" : ""}`}>
-      <td className="px-4 sm:px-5 py-3 text-sm font-semibold text-slate-800 whitespace-nowrap">{asset.assetName ?? asset.name ?? "—"}</td>
-      <td className="px-4 sm:px-5 py-3 hidden sm:table-cell"><span className="text-xs font-medium bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-md">{asset.assetType ?? asset.type ?? "—"}</span></td>
-      <td className="px-4 sm:px-5 py-3"><StatusBadge status={asset.status ?? "Unknown"} /></td>
-      <td className="px-4 sm:px-5 py-3 text-xs text-slate-400 hidden md:table-cell">{asset.location ?? "—"}</td>
+    <tr className={`hover:bg-indigo-50/50 transition-colors ${isEven?"bg-slate-50/60":""}`}>
+      <td className="px-4 sm:px-5 py-3 text-sm font-semibold text-slate-800 whitespace-nowrap">{asset.assetName??asset.name??"—"}</td>
+      <td className="px-4 sm:px-5 py-3 hidden sm:table-cell"><span className="text-xs font-medium bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-md">{asset.assetType??asset.type??"—"}</span></td>
+      <td className="px-4 sm:px-5 py-3"><StatusBadge status={asset.status??"Unknown"}/></td>
+      <td className="px-4 sm:px-5 py-3 text-xs text-slate-400 hidden md:table-cell">{asset.location??"—"}</td>
     </tr>
   );
 }
 
 function QuickActions() {
-  const navigate = useNavigate();
-  const user     = getStoredUser();
-  const isAdmin  = user.role === "Admin";
+  const navigate=useNavigate(), user=getStoredUser(), isAdmin=user.role==="Admin";
   return (
-    <div className="bg-white rounded-2xl p-4 border border-indigo-50" style={{ boxShadow: "0 2px 12px rgba(79,70,229,0.06)" }}>
+    <div className="bg-white rounded-2xl p-4 border border-indigo-50" style={{boxShadow:"0 2px 12px rgba(79,70,229,.06)"}}>
       <p className="text-sm font-bold text-indigo-950 mb-3">Quick Actions</p>
-      <button onClick={() => navigate("/assets")} className="w-full py-2.5 mb-2 rounded-xl text-sm font-semibold text-white transition-all hover:shadow-lg hover:-translate-y-0.5" style={{ background: "linear-gradient(90deg,#4f46e5,#7c3aed)", boxShadow: "0 4px 14px rgba(79,70,229,0.35)" }}>+ Add Asset</button>
-      <button onClick={() => navigate("/maintenance")} className="w-full py-2.5 mb-2 rounded-xl text-sm font-semibold text-white transition-all hover:shadow-lg hover:-translate-y-0.5" style={{ background: "linear-gradient(90deg,#0d9488,#14b8a6)", boxShadow: "0 4px 14px rgba(20,184,166,0.35)" }}>🔧 Schedule Maintenance</button>
-      {isAdmin && <button onClick={() => navigate("/create-employee")} className="w-full py-2.5 rounded-xl text-sm font-semibold text-white transition-all hover:shadow-lg hover:-translate-y-0.5" style={{ background: "linear-gradient(90deg,#7c3aed,#ec4899)", boxShadow: "0 4px 14px rgba(147,51,234,0.35)" }}>👤 Create Employee</button>}
+      <button onClick={()=>navigate("/assets")} className="w-full py-2.5 mb-2 rounded-xl text-sm font-semibold text-white transition-all hover:shadow-lg hover:-translate-y-0.5" style={{background:"linear-gradient(90deg,#4f46e5,#7c3aed)",boxShadow:"0 4px 14px rgba(79,70,229,.35)"}}>+ Add Asset</button>
+      <button onClick={()=>navigate("/maintenance")} className="w-full py-2.5 mb-2 rounded-xl text-sm font-semibold text-white transition-all hover:shadow-lg hover:-translate-y-0.5" style={{background:"linear-gradient(90deg,#0d9488,#14b8a6)",boxShadow:"0 4px 14px rgba(20,184,166,.35)"}}>🔧 Schedule Maintenance</button>
+      {isAdmin&&<button onClick={()=>navigate("/create-employee")} className="w-full py-2.5 rounded-xl text-sm font-semibold text-white transition-all hover:shadow-lg hover:-translate-y-0.5" style={{background:"linear-gradient(90deg,#7c3aed,#ec4899)",boxShadow:"0 4px 14px rgba(147,51,234,.35)"}}>👤 Create Employee</button>}
     </div>
   );
 }
 
 function AiInsights({ staticInsights, healthScore, assets, maintenance }) {
-  const [aiResult,      setAiResult]      = useState("");
-  const [loading,       setLoading]       = useState(false);
-  const [aiError,       setAiError]       = useState("");
-  const [displayText,   setDisplayText]   = useState("");
-  const [showAi,        setShowAi]        = useState(false);
-  const [selectedAsset, setSelectedAsset] = useState(null);
+  const {toast}=useToast();
+  const [aiResult,setAiResult]=useState(""), [loading,setLoading]=useState(false), [aiError,setAiError]=useState("");
+  const [displayText,setDisplayText]=useState(""), [showAi,setShowAi]=useState(false), [selectedAsset,setSelectedAsset]=useState(null);
+  useEffect(()=>{if(assets.length>0&&!selectedAsset)setSelectedAsset(assets[0]);},[assets]);
+  const twRef=useRef(null);
+  const typewrite=useCallback(txt=>{setDisplayText("");let i=0;clearInterval(twRef.current);twRef.current=setInterval(()=>{i++;setDisplayText(txt.slice(0,i));if(i>=txt.length)clearInterval(twRef.current);},20);},[]);
+  useEffect(()=>()=>clearInterval(twRef.current),[]);
+  const decision=useMemo(()=>{if(!aiResult)return null;const t=aiResult.toLowerCase();if(t.includes("replace"))return{icon:"\u26a0\ufe0f",label:"Replace Recommended",color:"#ef4444",bg:"rgba(239,68,68,.12)",border:"rgba(239,68,68,.3)",textColor:"#fca5a5"};if(t.includes("repair"))return{icon:"\u2714\ufe0f",label:"Repair Recommended",color:"#10b981",bg:"rgba(16,185,129,.12)",border:"rgba(16,185,129,.3)",textColor:"#6ee7b7"};return null;},[aiResult]);
+  const risk=useMemo(()=>{if(healthScore>=70)return{label:"Low Risk",color:"#34d399",bg:"rgba(52,211,153,.15)",border:"rgba(52,211,153,.3)",glow:"0 0 10px rgba(52,211,153,.4)"};if(healthScore>=40)return{label:"Medium Risk",color:"#fbbf24",bg:"rgba(251,191,36,.15)",border:"rgba(251,191,36,.3)",glow:"0 0 10px rgba(251,191,36,.4)"};return{label:"High Risk",color:"#f87171",bg:"rgba(248,113,113,.15)",border:"rgba(248,113,113,.3)",glow:"0 0 10px rgba(248,113,113,.4)"};},[healthScore]);
 
-  useEffect(() => { if (assets.length > 0 && !selectedAsset) setSelectedAsset(assets[0]); }, [assets]);
-
-  const typewriterRef = useRef(null);
-  const runTypewriter = useCallback((fullText) => {
-    setDisplayText(""); let i = 0; clearInterval(typewriterRef.current);
-    typewriterRef.current = setInterval(() => { i++; setDisplayText(fullText.slice(0, i)); if (i >= fullText.length) clearInterval(typewriterRef.current); }, 20);
-  }, []);
-  useEffect(() => () => clearInterval(typewriterRef.current), []);
-
-  const decision = useMemo(() => {
-    if (!aiResult) return null;
-    const t = aiResult.toLowerCase();
-    if (t.includes("replace")) return { icon: "⚠️", label: "Replace Recommended", color: "#ef4444", bg: "rgba(239,68,68,0.12)", border: "rgba(239,68,68,0.3)", textColor: "#fca5a5" };
-    if (t.includes("repair"))  return { icon: "✔️", label: "Repair Recommended",   color: "#10b981", bg: "rgba(16,185,129,0.12)", border: "rgba(16,185,129,0.3)", textColor: "#6ee7b7" };
-    return null;
-  }, [aiResult]);
-
-  const risk = useMemo(() => {
-    if (healthScore >= 70) return { label: "Low Risk",    color: "#34d399", bg: "rgba(52,211,153,0.15)",  border: "rgba(52,211,153,0.3)",  glow: "0 0 10px rgba(52,211,153,0.4)"  };
-    if (healthScore >= 40) return { label: "Medium Risk", color: "#fbbf24", bg: "rgba(251,191,36,0.15)",  border: "rgba(251,191,36,0.3)",  glow: "0 0 10px rgba(251,191,36,0.4)"  };
-    return                        { label: "High Risk",   color: "#f87171", bg: "rgba(248,113,113,0.15)", border: "rgba(248,113,113,0.3)", glow: "0 0 10px rgba(248,113,113,0.4)" };
-  }, [healthScore]);
-
-  const generateAI = async (asset) => {
-    if (!asset) { setAiError("Please select an asset first."); return; }
-    setLoading(true); setAiError(""); setAiResult(""); setDisplayText(""); setShowAi(false);
-    try {
-      const assetName = asset.assetName ?? asset.name ?? "";
-      const realMaintenanceCost = maintenance.filter((r) => { const nm = (r.assetName ?? "").toLowerCase() === assetName.toLowerCase(); const id = r.assetId !== undefined && r.assetId === asset.id; return nm || id; }).reduce((sum, r) => sum + parseCost(r.cost), 0);
-      const currentVal = parseCost(asset.currentValue ?? 0);
-      const maintenanceCost = realMaintenanceCost > 0 ? realMaintenanceCost : Math.round(currentVal * 0.3);
-      const payload = { assetName: assetName || "Unknown Asset", assetType: asset.assetType ?? asset.type ?? "General", purchaseCost: parseCost(asset.purchaseCost ?? asset.currentValue ?? 0), currentValue: currentVal, usefulLifeYears: Number(asset.usefulLifeYears) || 5, maintenanceCost };
-      const response = await api.post("/api/ai/recommendation", payload);
-      const resultText = typeof response.data === "string" ? response.data : response.data?.recommendation ?? response.data?.result ?? response.data?.message ?? JSON.stringify(response.data);
-      setAiResult(resultText); setShowAi(true); runTypewriter(resultText);
-    } catch (err) {
-      if      (err.code === "ERR_NETWORK")       setAiError("Cannot reach backend. Is Spring Boot running on port 8080?");
-      else if (err.response?.status === 404)     setAiError("Endpoint not found. Check /api/ai/recommendation in your backend.");
-      else setAiError(err.response?.data?.message ?? err.message ?? "Request failed.");
-    } finally { setLoading(false); }
+  const gen=async(asset)=>{
+    if(!asset){setAiError("Please select an asset first.");return;}
+    setLoading(true);setAiError("");setAiResult("");setDisplayText("");setShowAi(false);
+    try{
+      const name=asset.assetName??asset.name??"";
+      const rc=maintenance.filter(r=>{const nm=(r.assetName??"").toLowerCase()===name.toLowerCase();const id=r.assetId!==undefined&&r.assetId===asset.id;return nm||id;}).reduce((s,r)=>s+parseCost(r.cost),0);
+      const cv=parseCost(asset.currentValue??0), mc=rc>0?rc:Math.round(cv*.3);
+      const pl={assetName:name||"Unknown Asset",assetType:asset.assetType??asset.type??"General",purchaseCost:parseCost(asset.purchaseCost??asset.currentValue??0),currentValue:cv,usefulLifeYears:Number(asset.usefulLifeYears)||5,maintenanceCost:mc};
+      const r=await api.post("/api/ai/recommendation",pl);
+      const txt=typeof r.data==="string"?r.data:r.data?.recommendation??r.data?.result??r.data?.message??JSON.stringify(r.data);
+      setAiResult(txt);setShowAi(true);typewrite(txt);
+      toast.success("AI Analysis Complete",`Recommendation ready for ${name||"selected asset"}.`);
+    }catch(err){
+      const m=err.code==="ERR_NETWORK"?"Cannot reach server. Check your backend connection.":err.response?.status===404?"AI endpoint not found \u2014 check /api/ai/recommendation.":err.response?.data?.message??err.message??"Request failed.";
+      setAiError(m);toast.error("AI Analysis Failed",m);
+    }finally{setLoading(false);}
   };
-
-  const handleReset = () => { clearInterval(typewriterRef.current); setAiResult(""); setDisplayText(""); setAiError(""); setShowAi(false); };
+  const reset=()=>{clearInterval(twRef.current);setAiResult("");setDisplayText("");setAiError("");setShowAi(false);};
 
   return (
-    <div className="rounded-2xl p-4 relative overflow-hidden" style={{ background: "linear-gradient(135deg,#1e1b4b 0%,#312e81 65%,#134e4a 100%)" }}>
-      <div className="absolute -top-6 -right-6 w-28 h-28 rounded-full pointer-events-none" style={{ background: "radial-gradient(circle,rgba(99,102,241,0.5),transparent 70%)" }} />
-      <div className="absolute -bottom-5 -left-5 w-24 h-24 rounded-full pointer-events-none" style={{ background: "radial-gradient(circle,rgba(20,184,166,0.4),transparent 70%)" }} />
+    <div className="rounded-2xl p-4 relative overflow-hidden" style={{background:"linear-gradient(135deg,#1e1b4b 0%,#312e81 65%,#134e4a 100%)"}}>
+      <div className="absolute -top-6 -right-6 w-28 h-28 rounded-full pointer-events-none" style={{background:"radial-gradient(circle,rgba(99,102,241,.5),transparent 70%)"}}/>
+      <div className="absolute -bottom-5 -left-5 w-24 h-24 rounded-full pointer-events-none" style={{background:"radial-gradient(circle,rgba(20,184,166,.4),transparent 70%)"}}/>
       <div className="flex items-center gap-2 mb-3 relative z-10">
-        <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm flex-shrink-0" style={{ background: "linear-gradient(135deg,#818cf8,#34d399)", boxShadow: "0 0 14px rgba(129,140,248,0.6)" }}>★</div>
+        <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm flex-shrink-0" style={{background:"linear-gradient(135deg,#818cf8,#34d399)",boxShadow:"0 0 14px rgba(129,140,248,.6)"}}>&#9733;</div>
         <span className="text-sm font-bold text-white">AI Intelligence</span>
-        <span className="font-semibold tracking-widest uppercase rounded-full px-2 py-0.5 border" style={{ background: showAi ? "rgba(52,211,153,0.2)" : "rgba(52,211,153,0.12)", color: "#6ee7b7", borderColor: "rgba(52,211,153,0.3)", fontSize: 9 }}>{showAi ? "AI ✓" : "Live"}</span>
-        <span className="ml-auto font-bold rounded-full px-2 py-0.5 border" style={{ background: risk.bg, color: risk.color, borderColor: risk.border, fontSize: 9, boxShadow: risk.glow }}>{risk.label}</span>
+        <span className="font-semibold tracking-widest uppercase rounded-full px-2 py-0.5 border" style={{background:showAi?"rgba(52,211,153,.2)":"rgba(52,211,153,.12)",color:"#6ee7b7",borderColor:"rgba(52,211,153,.3)",fontSize:9}}>{showAi?"AI \u2713":"Live"}</span>
+        <span className="ml-auto font-bold rounded-full px-2 py-0.5 border" style={{background:risk.bg,color:risk.color,borderColor:risk.border,fontSize:9,boxShadow:risk.glow}}>{risk.label}</span>
       </div>
-      {assets.length > 0 && (
-        <div className="mb-3 relative z-10">
-          <label className="block text-xs text-indigo-400 font-semibold mb-1 uppercase tracking-wider">Analyse asset</label>
-          <select value={selectedAsset?.id ?? ""} onChange={(e) => { const picked = assets.find((a) => String(a.id) === e.target.value); setSelectedAsset(picked ?? null); handleReset(); }} className="w-full text-xs rounded-xl px-3 py-2 outline-none font-medium" style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.18)", color: "#e0e7ff" }}>
-            {assets.map((a) => <option key={a.id} value={a.id} style={{ background: "#312e81", color: "#e0e7ff" }}>{a.assetName ?? a.name ?? `Asset #${a.id}`}{a.assetType ? ` — ${a.assetType}` : ""}</option>)}
-          </select>
-        </div>
-      )}
+      {assets.length>0&&<div className="mb-3 relative z-10"><label className="block text-xs text-indigo-400 font-semibold mb-1 uppercase tracking-wider">Analyse asset</label><select value={selectedAsset?.id??""} onChange={e=>{const p=assets.find(a=>String(a.id)===e.target.value);setSelectedAsset(p??null);reset();}} className="w-full text-xs rounded-xl px-3 py-2 outline-none font-medium" style={{background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.18)",color:"#e0e7ff"}}>{assets.map(a=><option key={a.id} value={a.id} style={{background:"#312e81",color:"#e0e7ff"}}>{a.assetName??a.name??`Asset #${a.id}`}{a.assetType?` \u2014 ${a.assetType}`:""}</option>)}</select></div>}
       <div className="flex flex-col gap-2 mb-3 relative z-10">
-        {!showAi && !loading && staticInsights.map((text, i) => (
-          <div key={i} className="flex gap-2 items-start rounded-xl p-2.5 text-indigo-200 text-xs leading-relaxed border" style={{ background: "rgba(255,255,255,0.06)", borderColor: "rgba(255,255,255,0.08)" }}>
-            <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1" style={{ background: "linear-gradient(135deg,#818cf8,#34d399)" }} />{text}
-          </div>
-        ))}
-        {loading && (
-          <div className="flex items-center gap-3 rounded-xl p-3 border" style={{ background: "rgba(255,255,255,0.06)", borderColor: "rgba(255,255,255,0.08)" }}>
-            <span className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-            <span className="text-xs text-indigo-300">Analysing {selectedAsset?.assetName ?? "asset"}…</span>
-          </div>
-        )}
-        {showAi && !loading && (
-          <div className="rounded-xl p-3 border" style={{ background: "rgba(255,255,255,0.08)", borderColor: "rgba(255,255,255,0.14)" }}>
-            <p className="text-xs text-indigo-400 font-semibold mb-1.5 uppercase tracking-wide">{selectedAsset?.assetName ?? "Asset"} · {selectedAsset?.assetType ?? ""}</p>
-            <p className="text-xs text-indigo-100 leading-relaxed whitespace-pre-wrap">{displayText}{displayText.length < aiResult.length && <span className="inline-block w-0.5 h-3.5 bg-indigo-400 ml-0.5 animate-pulse" />}</p>
-          </div>
-        )}
-        {aiError && <div className="flex gap-2 items-start rounded-xl p-2.5 text-xs border" style={{ background: "rgba(239,68,68,0.12)", borderColor: "rgba(239,68,68,0.25)", color: "#fca5a5" }}><span className="flex-shrink-0">⚠️</span><span>{aiError}</span></div>}
+        {!showAi&&!loading&&staticInsights.map((t,i)=><div key={i} className="flex gap-2 items-start rounded-xl p-2.5 text-indigo-200 text-xs leading-relaxed border" style={{background:"rgba(255,255,255,.06)",borderColor:"rgba(255,255,255,.08)"}}><span className="w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1" style={{background:"linear-gradient(135deg,#818cf8,#34d399)"}}/>{t}</div>)}
+        {loading&&<div className="flex items-center gap-3 rounded-xl p-3 border" style={{background:"rgba(255,255,255,.06)",borderColor:"rgba(255,255,255,.08)"}}><span className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin flex-shrink-0"/><span className="text-xs text-indigo-300">Analysing {selectedAsset?.assetName??"asset"}\u2026</span></div>}
+        {showAi&&!loading&&<div className="rounded-xl p-3 border" style={{background:"rgba(255,255,255,.08)",borderColor:"rgba(255,255,255,.14)"}}><p className="text-xs text-indigo-400 font-semibold mb-1.5 uppercase tracking-wide">{selectedAsset?.assetName??"Asset"} \u00b7 {selectedAsset?.assetType??""}</p><p className="text-xs text-indigo-100 leading-relaxed whitespace-pre-wrap">{displayText}{displayText.length<aiResult.length&&<span className="inline-block w-0.5 h-3.5 bg-indigo-400 ml-0.5 animate-pulse"/>}</p></div>}
+        {aiError&&<div className="flex gap-2 items-start rounded-xl p-2.5 text-xs border" style={{background:"rgba(239,68,68,.12)",borderColor:"rgba(239,68,68,.25)",color:"#fca5a5"}}><span className="flex-shrink-0">\u26a0\ufe0f</span><span>{aiError}</span></div>}
       </div>
-      {decision && !loading && (
-        <div className="rounded-xl p-3 mb-3 border relative z-10" style={{ background: decision.bg, borderColor: decision.border }}>
-          <div className="flex items-center gap-2"><span className="text-base">{decision.icon}</span><div><p className="text-xs font-bold uppercase tracking-wide" style={{ color: decision.color }}>Recommendation</p><p className="text-xs font-semibold mt-0.5" style={{ color: decision.textColor }}>{decision.label}</p></div></div>
-        </div>
-      )}
-      <div className="rounded-xl p-2.5 mb-3 relative z-10" style={{ background: "rgba(255,255,255,0.05)" }}>
+      {decision&&!loading&&<div className="rounded-xl p-3 mb-3 border relative z-10" style={{background:decision.bg,borderColor:decision.border}}><div className="flex items-center gap-2"><span className="text-base">{decision.icon}</span><div><p className="text-xs font-bold uppercase tracking-wide" style={{color:decision.color}}>Recommendation</p><p className="text-xs font-semibold mt-0.5" style={{color:decision.textColor}}>{decision.label}</p></div></div></div>}
+      <div className="rounded-xl p-2.5 mb-3 relative z-10" style={{background:"rgba(255,255,255,.05)"}}>
         <div className="flex items-center justify-between mb-1.5"><span className="text-xs text-slate-400 font-medium">Asset Health Score</span><span className="text-xs text-indigo-300 font-bold">{healthScore}%</span></div>
-        <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.1)" }}><div className="h-full rounded-full" style={{ width: `${healthScore}%`, background: "linear-gradient(90deg,#818cf8,#34d399)", transition: "width 1.2s cubic-bezier(0.4,0,0.2,1)", boxShadow: "0 0 8px rgba(129,140,248,0.5)" }} /></div>
+        <div className="h-1.5 rounded-full overflow-hidden" style={{background:"rgba(255,255,255,.1)"}}><div className="h-full rounded-full" style={{width:`${healthScore}%`,background:"linear-gradient(90deg,#818cf8,#34d399)",transition:"width 1.2s cubic-bezier(.4,0,.2,1)",boxShadow:"0 0 8px rgba(129,140,248,.5)"}}/></div>
       </div>
-      <button onClick={() => generateAI(selectedAsset)} disabled={loading || !selectedAsset} className="w-full px-4 py-2 rounded-xl text-white text-xs font-semibold flex items-center justify-center gap-2 transition-all duration-200 relative z-10 disabled:opacity-60 disabled:cursor-not-allowed" style={{ background: loading ? "rgba(99,102,241,0.4)" : "linear-gradient(90deg,#4f46e5,#9333ea)", boxShadow: loading ? "none" : "0 4px 14px rgba(79,70,229,0.4)" }} onMouseEnter={(e) => { if (!loading) e.currentTarget.style.transform = "scale(1.03)"; }} onMouseLeave={(e) => { e.currentTarget.style.transform = "scale(1)"; }}>
-        {loading ? <><span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />Generating…</> : <>🤖 Generate AI Insight</>}
+      <button onClick={()=>gen(selectedAsset)} disabled={loading||!selectedAsset} className="w-full px-4 py-2 rounded-xl text-white text-xs font-semibold flex items-center justify-center gap-2 transition-all duration-200 relative z-10 disabled:opacity-60 disabled:cursor-not-allowed" style={{background:loading?"rgba(99,102,241,.4)":"linear-gradient(90deg,#4f46e5,#9333ea)",boxShadow:loading?"none":"0 4px 14px rgba(79,70,229,.4)"}} onMouseEnter={e=>{if(!loading)e.currentTarget.style.transform="scale(1.03)";}} onMouseLeave={e=>{e.currentTarget.style.transform="scale(1)";}}>
+        {loading?<><span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"/>Generating\u2026</>:<>🤖 Generate AI Insight</>}
       </button>
-      {showAi && !loading && <button onClick={handleReset} className="w-full text-center text-xs text-indigo-400 hover:text-indigo-200 mt-2 transition-colors relative z-10">↺ Reset to default insights</button>}
+      {showAi&&!loading&&<button onClick={reset} className="w-full text-center text-xs text-indigo-400 hover:text-indigo-200 mt-2 transition-colors relative z-10">\u21ba Reset to default insights</button>}
     </div>
   );
 }
 
 function DashboardContent({ assets, maintenance, loading, error, onRetry }) {
-  const navigate = useNavigate();
-  const summaryCards = useMemo(() => {
-    const total = assets.length, active = assets.filter((a) => (a.status ?? "").toLowerCase() === "active").length, mCnt = assets.filter((a) => (a.status ?? "").toLowerCase() === "maintenance").length;
-    const totalVal = assets.reduce((s, a) => s + parseCost(a.currentValue ?? a.value), 0), activeRate = total > 0 ? ((active / total) * 100).toFixed(1) : "0";
+  const navigate=useNavigate(), {toast}=useToast();
+  const cards=useMemo(()=>{
+    const tot=assets.length, act=assets.filter(a=>(a.status??"").toLowerCase()==="active").length, mc=assets.filter(a=>(a.status??"").toLowerCase()==="maintenance").length;
+    const tv=assets.reduce((s,a)=>s+parseCost(a.currentValue??a.value),0), ar=tot>0?((act/tot)*100).toFixed(1):"0";
     return [
-      { label: "Total Assets",    value: total.toLocaleString(),  sub: "Across all departments",    icon: "🗂️", trend: `${total} total`,      trendColor: "text-indigo-600 bg-indigo-50 border-indigo-200",   topBorder: "from-indigo-500 to-indigo-400", iconBg: "from-indigo-50 to-indigo-100",  route: "/assets"      },
-      { label: "Active Assets",   value: active.toLocaleString(), sub: `${activeRate}% utilization`, icon: "✅", trend: `↑ ${activeRate}%`,    trendColor: "text-emerald-600 bg-emerald-50 border-emerald-200", topBorder: "from-teal-400 to-emerald-400",  iconBg: "from-teal-50 to-emerald-100",   route: "/assets"      },
-      { label: "Maintenance Due", value: mCnt.toLocaleString(),   sub: mCnt > 0 ? "Requires attention" : "All clear", icon: "🔧", trend: mCnt > 0 ? "⚠ Due" : "✓ Clear", trendColor: mCnt > 0 ? "text-amber-600 bg-amber-50 border-amber-200" : "text-emerald-600 bg-emerald-50 border-emerald-200", topBorder: "from-amber-400 to-yellow-300", iconBg: "from-amber-50 to-yellow-100", route: "/maintenance" },
-      { label: "Total Value",     value: fmtValue(totalVal),      sub: `${total} assets tracked`,   icon: "💰", trend: "Live",                trendColor: "text-emerald-600 bg-emerald-50 border-emerald-200", topBorder: "from-violet-500 to-purple-400", iconBg: "from-violet-50 to-purple-100",  route: "/reports"     },
+      {label:"Total Assets",  value:tot.toLocaleString(), sub:"Across all departments",    icon:"\ud83d\uddc2\ufe0f",trend:`${tot} total`,      trendColor:"text-indigo-600 bg-indigo-50 border-indigo-200",   topBorder:"from-indigo-500 to-indigo-400",iconBg:"from-indigo-50 to-indigo-100", route:"/assets"},
+      {label:"Active Assets", value:act.toLocaleString(), sub:`${ar}% utilization`,         icon:"\u2705",trend:`\u2191 ${ar}%`,    trendColor:"text-emerald-600 bg-emerald-50 border-emerald-200",topBorder:"from-teal-400 to-emerald-400", iconBg:"from-teal-50 to-emerald-100",  route:"/assets"},
+      {label:"Maintenance Due",value:mc.toLocaleString(),  sub:mc>0?"Requires attention":"All clear",icon:"\ud83d\udd27",trend:mc>0?"\u26a0 Due":"\u2713 Clear",trendColor:mc>0?"text-amber-600 bg-amber-50 border-amber-200":"text-emerald-600 bg-emerald-50 border-emerald-200",topBorder:"from-amber-400 to-yellow-300",iconBg:"from-amber-50 to-yellow-100",route:"/maintenance"},
+      {label:"Total Value",    value:fmtValue(tv),          sub:`${tot} assets tracked`,     icon:"\ud83d\udcb0",trend:"Live",         trendColor:"text-emerald-600 bg-emerald-50 border-emerald-200",topBorder:"from-violet-500 to-purple-400",iconBg:"from-violet-50 to-purple-100",route:"/reports"},
     ];
-  }, [assets]);
-  const recentAssets = useMemo(() => assets.slice(0, 6), [assets]);
-  const { staticInsights, healthScore } = useMemo(() => {
-    const total = assets.length, active = assets.filter((a) => (a.status ?? "").toLowerCase() === "active").length, inMaint = assets.filter((a) => (a.status ?? "").toLowerCase() === "maintenance").length, inactive = assets.filter((a) => (a.status ?? "").toLowerCase() === "inactive").length;
-    const score = total > 0 ? Math.round((active / total) * 100) : 0, totalSpend = maintenance.reduce((s, r) => s + parseCost(r.cost), 0);
-    const lines = [];
-    if (total > 0)      lines.push(`Fleet has ${total} assets — ${active} active, ${inMaint} in maintenance, ${inactive} inactive.`);
-    if (inMaint > 0)    lines.push(`${inMaint} asset${inMaint > 1 ? "s require" : " requires"} maintenance — visit the Maintenance page.`);
-    if (totalSpend > 0) lines.push(`Total maintenance spend: $${totalSpend.toLocaleString("en-US")} across all records.`);
-    if (lines.length === 0) lines.push("Connect your backend to see real-time insights.");
-    return { staticInsights: lines, healthScore: score };
-  }, [assets, maintenance]);
+  },[assets]);
+  const recent=useMemo(()=>assets.slice(0,6),[assets]);
+  const {staticInsights,healthScore}=useMemo(()=>{
+    const tot=assets.length, act=assets.filter(a=>(a.status??"").toLowerCase()==="active").length, im=assets.filter(a=>(a.status??"").toLowerCase()==="maintenance").length, ia=assets.filter(a=>(a.status??"").toLowerCase()==="inactive").length;
+    const sc=tot>0?Math.round((act/tot)*100):0, ts=maintenance.reduce((s,r)=>s+parseCost(r.cost),0);
+    const ln=[];
+    if(tot>0) ln.push(`Fleet has ${tot} assets \u2014 ${act} active, ${im} in maintenance, ${ia} inactive.`);
+    if(im>0)  ln.push(`${im} asset${im>1?"s require":" requires"} maintenance \u2014 visit the Maintenance page.`);
+    if(ts>0)  ln.push(`Total maintenance spend: $${ts.toLocaleString("en-US")} across all records.`);
+    if(ln.length===0) ln.push("Connect your backend to see real-time insights.");
+    return {staticInsights:ln,healthScore:sc};
+  },[assets,maintenance]);
 
-  if (loading) return <div className="flex items-center justify-center py-24 text-indigo-400 text-sm gap-2"><span className="animate-spin text-lg">⟳</span> Loading dashboard data…</div>;
-  if (error) return (
+  const loadShown=useRef(false);
+  useEffect(()=>{if(!loading&&!error&&assets.length>0&&!loadShown.current){loadShown.current=true;toast.success("Dashboard Ready",`${assets.length} asset${assets.length!==1?"s":""} loaded and synced successfully.`);}}, [loading,error,assets.length]);
+  useEffect(()=>{if(!loading&&error){const m=error.code==="ERR_NETWORK"?"Cannot reach the server. Check your backend is online.": `Server error ${error.response?.status??""}: ${error.message}`;toast.error("Failed to Load Data",m);}}, [loading,error]);
+
+  if(loading) return <div className="flex items-center justify-center py-24 text-indigo-400 text-sm gap-2"><span className="animate-spin text-lg">\u27f3</span> Loading dashboard data\u2026</div>;
+  if(error) return (
     <div className="rounded-2xl border border-red-200 bg-red-50 overflow-hidden">
       <div className="flex items-center gap-3 px-4 sm:px-5 py-3 bg-red-100/60 border-b border-red-200">
-        <span>⚠️</span>
-        <span className="text-xs sm:text-sm font-semibold text-red-800 flex-1">{error.code === "ERR_NETWORK" ? "Network error — check Spring Boot and @CrossOrigin." : `Error ${error.response?.status ?? ""}: ${error.message}`}</span>
-        <button onClick={onRetry} className="text-xs font-semibold text-white px-3 py-1.5 rounded-lg flex-shrink-0" style={{ background: "linear-gradient(90deg,#4f46e5,#9333ea)" }}>↺ Retry</button>
+        <span>\u26a0\ufe0f</span>
+        <span className="text-xs sm:text-sm font-semibold text-red-800 flex-1">{error.code==="ERR_NETWORK"?"Network error \u2014 check Spring Boot and @CrossOrigin.":`Error ${error.response?.status??""}: ${error.message}`}</span>
+        <button onClick={onRetry} className="text-xs font-semibold text-white px-3 py-1.5 rounded-lg flex-shrink-0" style={{background:"linear-gradient(90deg,#4f46e5,#9333ea)"}}>↺ Retry</button>
       </div>
       <div className="px-4 sm:px-5 py-4 text-xs text-red-600"><p>Add to your Spring Boot controllers:</p><code className="bg-red-100 px-2 py-1 rounded block w-fit mt-1">@CrossOrigin(origins = "http://localhost:3000")</code></div>
     </div>
   );
-
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {summaryCards.map((card) => <div key={card.label} onClick={() => card.route && navigate(card.route)} className="cursor-pointer"><StatCard label={card.label} value={card.value} sub={card.sub} icon={card.icon} trend={card.trend} trendColor={card.trendColor} topBorder={card.topBorder} iconBg={card.iconBg} /></div>)}
-      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">{cards.map(c=><div key={c.label} onClick={()=>c.route&&navigate(c.route)} className="cursor-pointer"><StatCard label={c.label} value={c.value} sub={c.sub} icon={c.icon} trend={c.trend} trendColor={c.trendColor} topBorder={c.topBorder} iconBg={c.iconBg}/></div>)}</div>
       <div className="flex flex-col lg:flex-row gap-4">
-        <div className="flex-1 bg-white rounded-2xl border border-indigo-50 overflow-hidden" style={{ boxShadow: "0 2px 12px rgba(79,70,229,0.06)" }}>
+        <div className="flex-1 bg-white rounded-2xl border border-indigo-50 overflow-hidden" style={{boxShadow:"0 2px 12px rgba(79,70,229,.06)"}}>
           <div className="flex items-center justify-between px-4 sm:px-5 py-3.5 border-b border-indigo-50/80">
             <span className="text-sm font-bold text-indigo-950">Recent Assets</span>
-            <button onClick={() => navigate("/assets")} className="text-xs text-indigo-500 font-medium hover:underline">View all →</button>
+            <button onClick={()=>navigate("/assets")} className="text-xs text-indigo-500 font-medium hover:underline">View all \u2192</button>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr style={{ background: "linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>{[{l:"Asset Name",c:""},{l:"Type",c:"hidden sm:table-cell"},{l:"Status",c:""},{l:"Location",c:"hidden md:table-cell"}].map((h) => <th key={h.l} className={`px-4 sm:px-5 py-2.5 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider ${h.c}`}>{h.l}</th>)}</tr></thead>
-              <tbody>{recentAssets.length > 0 ? recentAssets.map((a, i) => <TableRow key={a.id ?? i} asset={a} isEven={i % 2 !== 0} />) : <tr><td colSpan={4} className="px-5 py-8 text-center text-sm text-slate-400">No assets found.</td></tr>}</tbody>
+              <thead><tr style={{background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)"}}>{[{l:"Asset Name",c:""},{l:"Type",c:"hidden sm:table-cell"},{l:"Status",c:""},{l:"Location",c:"hidden md:table-cell"}].map(h=><th key={h.l} className={`px-4 sm:px-5 py-2.5 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider ${h.c}`}>{h.l}</th>)}</tr></thead>
+              <tbody>{recent.length>0?recent.map((a,i)=><TableRow key={a.id??i} asset={a} isEven={i%2!==0}/>):<tr><td colSpan={4} className="px-5 py-8 text-center text-sm text-slate-400">No assets found.</td></tr>}</tbody>
             </table>
           </div>
-          <div className="px-4 sm:px-5 py-2.5 border-t border-indigo-50"><span className="text-xs text-slate-400">Showing {recentAssets.length} of {assets.length} assets</span></div>
+          <div className="px-4 sm:px-5 py-2.5 border-t border-indigo-50"><span className="text-xs text-slate-400">Showing {recent.length} of {assets.length} assets</span></div>
         </div>
         <div className="flex flex-col sm:flex-row lg:flex-col gap-4 w-full lg:w-56">
-          <div className="flex-1 lg:flex-none"><QuickActions /></div>
-          <div className="flex-1 lg:flex-none"><AiInsights staticInsights={staticInsights} healthScore={healthScore} assets={assets} maintenance={maintenance} /></div>
+          <div className="flex-1 lg:flex-none"><QuickActions/></div>
+          <div className="flex-1 lg:flex-none"><AiInsights staticInsights={staticInsights} healthScore={healthScore} assets={assets} maintenance={maintenance}/></div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function DashboardInner() {
+  const [assets,setAssets]=useState([]), [maint,setMaint]=useState([]), [loading,setLoading]=useState(true), [error,setError]=useState(null), [open,setOpen]=useState(false);
+  const fetch=()=>{setLoading(true);setError(null);Promise.all([api.get("/api/assets"),api.get("/api/maintenance")]).then(([a,m])=>{setAssets(a.data);setMaint(m.data);}).catch(e=>setError(e)).finally(()=>setLoading(false));};
+  useEffect(()=>{fetch();},[]);
+  const assetMap=useMemo(()=>{const m={};assets.forEach(a=>{if(a.id!=null)m[a.id]=a.assetName??a.name??`Asset #${a.id}`;});return m;},[assets]);
+  const notifs=useMemo(()=>buildNotifications(assets,maint,assetMap),[assets,maint,assetMap]);
+  return (
+    <div className="flex min-h-screen" style={{background:"linear-gradient(135deg,#f0f0ff 0%,#f5f9ff 50%,#f0fff8 100%)"}}>
+      <Sidebar mobileOpen={open} onClose={()=>setOpen(false)}/>
+      <div className="flex flex-col flex-1 min-w-0">
+        <Navbar onMenuToggle={()=>setOpen(o=>!o)} notifications={notifs}/>
+        <main className="flex-1 p-3 sm:p-4 lg:p-6 overflow-auto">
+          <DashboardContent assets={assets} maintenance={maint} loading={loading} error={error} onRetry={fetch}/>
+        </main>
       </div>
     </div>
   );
 }
 
 export default function Dashboard() {
-  const [assets,      setAssets]      = useState([]);
-  const [maintenance, setMaintenance] = useState([]);
-  const [loading,     setLoading]     = useState(true);
-  const [error,       setError]       = useState(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-
-  const fetchAll = () => {
-    setLoading(true); setError(null);
-    Promise.all([api.get("/api/assets"), api.get("/api/maintenance")])
-      .then(([a, m]) => { setAssets(a.data); setMaintenance(m.data); })
-      .catch((err) => setError(err))
-      .finally(() => setLoading(false));
-  };
-  useEffect(() => { fetchAll(); }, []);
-
-  // ASSET NAME FIX: build assetMap so bell shows real names
-  const assetMap = useMemo(() => {
-    const map = {};
-    assets.forEach((a) => { if (a.id != null) map[a.id] = a.assetName ?? a.name ?? `Asset #${a.id}`; });
-    return map;
-  }, [assets]);
-
-  // ASSET NAME FIX: pass assetMap into buildNotifications
-  const notifications = useMemo(
-    () => buildNotifications(assets, maintenance, assetMap),
-    [assets, maintenance, assetMap]
-  );
-
-  return (
-    <div className="flex min-h-screen" style={{ background: "linear-gradient(135deg,#f0f0ff 0%,#f5f9ff 50%,#f0fff8 100%)" }}>
-      <Sidebar mobileOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
-      <div className="flex flex-col flex-1 min-w-0">
-        <Navbar onMenuToggle={() => setSidebarOpen((o) => !o)} notifications={notifications} />
-        <main className="flex-1 p-3 sm:p-4 lg:p-6 overflow-auto">
-          <DashboardContent assets={assets} maintenance={maintenance} loading={loading} error={error} onRetry={fetchAll} />
-        </main>
-      </div>
-    </div>
-  );
+  return <ToastProvider><DashboardInner/></ToastProvider>;
 }
