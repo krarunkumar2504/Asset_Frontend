@@ -47,7 +47,7 @@ import axios from "axios";
 const api = axios.create({
   baseURL: "https://assest-management-system.onrender.com/",
   headers: { "Content-Type": "application/json", Accept: "application/json" },
-  timeout: 8000,
+  timeout: 30000,   // 30 s — Render.com free tier cold-starts can take 15-20 s
 });
 
 const NAV_ITEMS = [
@@ -265,9 +265,10 @@ function useToast() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// NOTIFICATION DROPDOWN — MOBILE FIX
-// Now positioned correctly on phones: attaches to right edge,
-// never overflows off the left side of the screen.
+// NOTIFICATION DROPDOWN — MOBILE FIX (v2)
+// Strategy: fixed width 300px, right-aligned to bell but clamped
+// so it never goes off the LEFT edge of the screen.
+// On very small phones (<340px) it stretches edge-to-edge with 8px margins.
 // ─────────────────────────────────────────────────────────────
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
   const TYPE_STYLE = {
@@ -276,19 +277,20 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
     info:     { iconBg: "bg-indigo-100", dot: "bg-indigo-400", title: "text-indigo-700" },
   };
 
-  // MOBILE FIX: calculate position so dropdown never goes off-screen left
-  const isMobile = window.innerWidth < 480;
-  const DROPDOWN_W = isMobile ? Math.min(320, window.innerWidth - 16) : 320;
+  const screenW    = window.innerWidth;
+  const MARGIN     = 8;                                      // min gap from screen edge
+  const dropW      = Math.min(300, screenW - MARGIN * 2);   // never wider than screen
 
-  // Right-align to the bell button, but clamp so left edge >= 8px
-  const rightFromEdge = anchorRect ? window.innerWidth - anchorRect.right : 16;
-  const computedRight = Math.max(8, rightFromEdge);
+  // Ideal: right edge of dropdown aligns with right edge of bell button
+  const bellRight  = anchorRect ? anchorRect.right : screenW - MARGIN;
+  // left = bellRight - dropW, but clamp so it never goes < MARGIN
+  const computedLeft = Math.max(MARGIN, bellRight - dropW);
 
   const style = {
     position:     "fixed",
     top:          (anchorRect?.bottom ?? 60) + 8,
-    right:        computedRight,
-    width:        DROPDOWN_W,
+    left:         computedLeft,          // ← use LEFT not RIGHT
+    width:        dropW,
     zIndex:       9999,
     background:   "#fff",
     borderRadius: 16,
@@ -984,8 +986,8 @@ function Assets({ toast }) {
       .catch((err) => {
         setError(err);
         toast(
-          err.code === "ERR_NETWORK"
-            ? "Network error — unable to reach the server. Please check your connection."
+          err.code === "ERR_NETWORK" || err.code === "ECONNABORTED"
+            ? "Server is waking up (Render cold start — please wait 20 s and retry)."
             : `Failed to load assets: ${err.message}`,
           "error"
         );
