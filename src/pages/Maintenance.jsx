@@ -1,34 +1,26 @@
 // ─────────────────────────────────────────────────────────────
-// Maintenance.jsx — Role Title Fix + Real Asset Names in Notifications
+// Maintenance.jsx — v4.1  Mobile Notification Fix + 30s Timeout
 //
 // ═══════════════════════════════════════════════════════════
-// WHAT WAS CHANGED FROM PREVIOUS VERSION
+// CHANGES IN THIS VERSION (applied from Assets.jsx v4.0)
 // ═══════════════════════════════════════════════════════════
 //
-// 1. ROLE-BASED DASHBOARD TITLE  (search "// ROLE TITLE FIX")
-//    Problem: Navbar hardcoded "Admin Dashboard" for all users.
-//    Fix: getDashboardLabel(user) reads user.role from localStorage:
-//      - "Admin"    → "Admin Dashboard"
-//      - "Employee" → "Employee Dashboard"
-//      - any other  → "<Role> Dashboard"
-//      - no role    → "Dashboard"
+// 1. MOBILE NOTIFICATION FIX  (matches Assets.jsx v4.0)
+//    - Old approach used `right: computedRight` with wide fixed width.
+//      On phones this pushed the dropdown off-screen to the left.
+//    - New approach switches to LEFT positioning:
+//        left = bellRight - dropW, clamped to Math.max(8px, ...)
+//      so it can never go off the left edge.
+//    - Width clamped to screenWidth - 16px — fits any phone.
 //
-// 2. REAL ASSET NAMES IN NOTIFICATIONS  (search "// ASSET NAME FIX - NOTIF")
-//    Problem: buildNotifications used `Asset #${r.assetId}` as a
-//    fallback for overdue records, showing meaningless IDs like
-//    "Asset #1" in the notification bell dropdown.
-//    Fix: buildNotifications now accepts assetMap (id → name) as
-//    a third argument. resolveNotifAssetName(record, assetMap) resolves:
-//      1. record.assetName   — if already present
-//      2. assetMap[assetId]  — looked up from the fetched assets list
-//      3. "Asset #<id>"      — only absolute last resort
-//    The assetMap is passed in from both the Maintenance component
-//    and the root MaintenancePage so the Navbar bell also gets
-//    real names immediately on load.
+// 2. TIMEOUT INCREASED TO 30 SECONDS  (matches Assets.jsx v4.0)
+//    - Render.com free tier cold-starts take 15–20 s after inactivity.
+//    - Old 8 s timeout expired before the server woke up.
+//    - Error toast now tells user to wait 20 s and retry.
 //
-// ALL OTHER LOGIC — UNCHANGED
-//   Real notifications, real AI per record, asset name fix in table,
-//   working pagination, user name fix — all intact from previous version.
+// ALL PREVIOUS FIXES RETAINED
+//   Role-based dashboard title, real asset names in notifications,
+//   working pagination, AI per record — all intact.
 // ─────────────────────────────────────────────────────────────
 
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
@@ -38,11 +30,13 @@ import axios from "axios";
 
 // ─────────────────────────────────────────────────────────────
 // AXIOS INSTANCE
+// TIMEOUT FIX: increased from 8000 → 30000 ms
+// Render.com free tier cold-starts can take 15–20 s after inactivity.
 // ─────────────────────────────────────────────────────────────
 const api = axios.create({
   baseURL: "https://assest-management-system.onrender.com/",
   headers: { "Content-Type": "application/json", Accept: "application/json" },
-  timeout: 8000,
+  timeout: 30000,   // 30 s — Render.com free tier cold-starts can take 15-20 s
 });
 
 const NAV_ITEMS = [
@@ -116,11 +110,6 @@ const BAR_GRADIENTS = [
 
 // ─────────────────────────────────────────────────────────────
 // ROLE TITLE FIX — derives the navbar label from user.role
-//
-// Admin    → "Admin Dashboard"
-// Employee → "Employee Dashboard"
-// Manager  → "Manager Dashboard"
-// (none)   → "Dashboard"
 // ─────────────────────────────────────────────────────────────
 function getDashboardLabel(user) {
   const role = (user.role ?? "").trim();
@@ -140,12 +129,6 @@ function resolveAssetName(record, assetMap) {
 // ─────────────────────────────────────────────────────────────
 // ASSET NAME FIX - NOTIF
 // resolveNotifAssetName — same logic but named separately for clarity.
-// Used inside buildNotifications so the bell dropdown shows real names.
-//
-// Priority:
-//   1. record.assetName   — if the backend already includes it
-//   2. assetMap[assetId]  — looked up from the full assets list
-//   3. "Asset #<id>"      — only as absolute last resort
 // ─────────────────────────────────────────────────────────────
 function resolveNotifAssetName(record, assetMap) {
   if (record.assetName && record.assetName.trim()) return record.assetName.trim();
@@ -155,16 +138,10 @@ function resolveNotifAssetName(record, assetMap) {
 
 // ─────────────────────────────────────────────────────────────
 // NOTIFICATION BUILDER
-//
-// ASSET NAME FIX - NOTIF: now accepts assetMap as third argument.
-// Overdue records use resolveNotifAssetName(r, assetMap) instead of
-// the old `r.assetName ?? \`Asset #${r.assetId}\`` which showed IDs.
 // ─────────────────────────────────────────────────────────────
 function buildNotifications(assets, records, assetMap = {}) {
   const notes = [];
 
-  // Overdue maintenance records
-  // ASSET NAME FIX - NOTIF: real name via resolveNotifAssetName
   records
     .filter((r) => deriveStatus(r.nextDueDate) === "Overdue")
     .slice(0, 3)
@@ -174,13 +151,11 @@ function buildNotifications(assets, records, assetMap = {}) {
         type:    "critical",
         icon:    "🚨",
         title:   "Overdue Maintenance",
-        // ASSET NAME FIX - NOTIF: shows "Dell Laptop" not "Asset #1"
         message: `${resolveNotifAssetName(r, assetMap)} — due on ${r.nextDueDate ?? "unknown date"}`,
         time:    "Overdue",
       });
     });
 
-  // Assets currently under maintenance
   assets
     .filter((a) => (a.status ?? "").toLowerCase() === "maintenance")
     .slice(0, 2)
@@ -195,7 +170,6 @@ function buildNotifications(assets, records, assetMap = {}) {
       });
     });
 
-  // Pending count
   const pending = records.filter((r) => deriveStatus(r.nextDueDate) === "Pending");
   if (pending.length > 0) {
     notes.push({
@@ -208,7 +182,6 @@ function buildNotifications(assets, records, assetMap = {}) {
     });
   }
 
-  // Inactive assets
   const inactive = assets.filter((a) => (a.status ?? "").toLowerCase() === "inactive");
   if (inactive.length > 0) {
     notes.push({
@@ -234,7 +207,14 @@ function buildNotifications(assets, records, assetMap = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// NOTIFICATION DROPDOWN — React Portal (no collision)
+// NOTIFICATION DROPDOWN — MOBILE FIX (matches Assets.jsx v4.0)
+//
+// Strategy: fixed width 300px, left-aligned from bell button but
+// clamped so it never goes off the LEFT edge of the screen.
+// On very small phones (<316px) it stretches edge-to-edge with 8px margins.
+//
+// Old approach: right: computedRight — pushed dropdown off-screen left on phones.
+// New approach: left = bellRight - dropW, clamped to Math.max(8, ...)
 // ─────────────────────────────────────────────────────────────
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
   const TYPE_STYLE = {
@@ -243,11 +223,20 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
     info:     { iconBg: "bg-indigo-100", dot: "bg-indigo-400", title: "text-indigo-700" },
   };
 
+  const screenW   = window.innerWidth;
+  const MARGIN    = 8;                                      // min gap from screen edge
+  const dropW     = Math.min(300, screenW - MARGIN * 2);   // never wider than screen
+
+  // Ideal: right edge of dropdown aligns with right edge of bell button
+  const bellRight     = anchorRect ? anchorRect.right : screenW - MARGIN;
+  // left = bellRight - dropW, but clamp so it never goes < MARGIN
+  const computedLeft  = Math.max(MARGIN, bellRight - dropW);
+
   const style = {
     position:     "fixed",
     top:          (anchorRect?.bottom ?? 60) + 8,
-    right:        anchorRect ? window.innerWidth - anchorRect.right : 16,
-    width:        320,
+    left:         computedLeft,          // ← LEFT not RIGHT — mobile fix
+    width:        dropW,
     zIndex:       9999,
     background:   "#fff",
     borderRadius: 16,
@@ -379,6 +368,7 @@ function MaintenanceAiPanel({ record, assetMap, assetList, onClear }) {
     } catch (err) {
       console.error("AI error:", err);
       if      (err.code === "ERR_NETWORK")       setAiError("Cannot reach backend — is Spring Boot running on port 8080?");
+      else if (err.code === "ECONNABORTED")      setAiError("Server is waking up (Render cold start — please wait 20 s and retry).");
       else if (err.response?.status === 404)     setAiError("Endpoint not found — check /api/ai/recommendation in your backend.");
       else setAiError(err.response?.data?.message ?? err.message ?? "Request failed.");
     } finally { setLoading(false); }
@@ -537,7 +527,7 @@ function SidebarContent({ onNavigate }) {
       <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
         <p className="text-xs text-emerald-400 font-semibold tracking-wide uppercase">{user.role ?? "Administrator"}</p>
         <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{displayName}</p>
-        <p className="text-xs text-indigo-600 mt-0.5">v3.1.0 — Pro Plan</p>
+        <p className="text-xs text-indigo-600 mt-0.5">v4.1.0 — Pro Plan</p>
       </div>
     </div>
   );
@@ -571,11 +561,6 @@ function Sidebar({ mobileOpen, onClose }) {
 
 // ─────────────────────────────────────────────────────────────
 // NAVBAR
-//
-// ROLE TITLE FIX:
-//   Before: hardcoded "Admin Dashboard" for every user
-//   After:  getDashboardLabel(user) → "Employee Dashboard / Maintenance"
-//           or "Admin Dashboard / Maintenance" based on actual role
 // ─────────────────────────────────────────────────────────────
 function Navbar({ onMenuToggle, notifications }) {
   const navigate    = useNavigate();
@@ -593,11 +578,9 @@ function Navbar({ onMenuToggle, notifications }) {
   };
   const pageTitle = TITLES[location.pathname] ?? "Maintenance";
 
-  // ROLE TITLE FIX: dynamic label instead of hardcoded "Admin Dashboard"
   const dashboardLabel = getDashboardLabel(user);
-
-  const initials    = getUserInitials(user);
-  const displayName = getUserDisplayName(user);
+  const initials       = getUserInitials(user);
+  const displayName    = getUserDisplayName(user);
 
   const handleBellClick = () => {
     if (bellRef.current) setAnchorRect(bellRef.current.getBoundingClientRect());
@@ -621,11 +604,6 @@ function Navbar({ onMenuToggle, notifications }) {
       </button>
 
       <div className="flex-1 min-w-0">
-        {/*
-          ROLE TITLE FIX:
-          Desktop → "Employee Dashboard / Maintenance"
-          Mobile  → "Maintenance" (space-efficient, unchanged)
-        */}
         <span className="text-sm font-bold text-indigo-950 hidden sm:inline">{dashboardLabel}</span>
         <span className="text-xs text-indigo-300 hidden sm:inline"> / {pageTitle}</span>
         <span className="text-sm font-bold text-indigo-950 sm:hidden">{pageTitle}</span>
@@ -1058,7 +1036,6 @@ function Maintenance() {
     [records, assetMap]
   );
 
-  // Reset to page 1 on filter changes
   useEffect(() => { setCurrentPage(1); }, [search, assetFilter, statusFilter, dateFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
@@ -1091,7 +1068,6 @@ function Maintenance() {
     { label: "Overdue",       value: statValues.overdue,   sub: "Needs immediate action", icon: "🚨", accent: "from-red-500 to-rose-400"      },
   ];
 
-  // ASSET NAME FIX - NOTIF: pass assetMap so bell shows real names
   const notifications = useMemo(
     () => buildNotifications(assetList, records, assetMap),
     [assetList, records, assetMap]
@@ -1204,8 +1180,8 @@ function Maintenance() {
             <div className="flex items-center gap-3 px-4 sm:px-5 py-3 bg-red-100/60 border-b border-red-200">
               <span>⚠️</span>
               <span className="text-xs sm:text-sm font-semibold text-red-800 flex-1">
-                {error.code === "ERR_NETWORK"
-                  ? "Network error — check Spring Boot and @CrossOrigin."
+                {error.code === "ERR_NETWORK" || error.code === "ECONNABORTED"
+                  ? "Server is waking up (Render cold start — please wait 20 s and retry)."
                   : `Error ${error.response?.status ?? ""}: ${error.message}`}
               </span>
               <button onClick={fetchAll}
@@ -1347,14 +1323,12 @@ export default function MaintenancePage() {
       .catch(() => {});
   }, []);
 
-  // ASSET NAME FIX - NOTIF: assetMap at root level for Navbar bell
   const assetMap = useMemo(() => {
     const map = {};
     assets.forEach((a) => { if (a.id != null) map[a.id] = a.assetName ?? a.name ?? `Asset #${a.id}`; });
     return map;
   }, [assets]);
 
-  // ASSET NAME FIX - NOTIF: pass assetMap so bell shows real names
   const notifications = useMemo(
     () => buildNotifications(assets, records, assetMap),
     [assets, records, assetMap]
