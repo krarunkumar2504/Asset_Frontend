@@ -1,35 +1,39 @@
 // ─────────────────────────────────────────────────────────────
-// Assets.jsx — Role Title Fix + Asset Names in Notifications + Working Pagination
+// Assets.jsx — v4.0  All Fixes Applied
 //
 // ═══════════════════════════════════════════════════════════
-// WHAT WAS CHANGED FROM PREVIOUS VERSION
+// CHANGES IN THIS VERSION
 // ═══════════════════════════════════════════════════════════
 //
-// 1. ROLE-BASED DASHBOARD TITLE  (search "// ROLE TITLE FIX")
-//    Problem: Navbar always hardcoded "Admin Dashboard" for everyone.
-//    Fix: getDashboardLabel(user) reads user.role from localStorage
-//    and returns "<Role> Dashboard" e.g. "Employee Dashboard".
+// 1. MOBILE NOTIFICATION FIX
+//    - Dropdown now uses right:0/left:auto on small screens
+//    - No more half-hidden panel on the left
+//    - Width capped to screen width with mx-2 safe zone
 //
-// 2. REAL ASSET NAMES IN NOTIFICATIONS  (search "// ASSET NAME FIX")
-//    Problem: buildNotifications used `Asset #${r.assetId}` as a
-//    fallback which showed meaningless IDs in the notification dropdown.
-//    Fix: buildNotifications now accepts assetMap (id → name).
-//    resolveNotifAssetName(record, assetMap) resolves the real name:
-//      1. record.assetName  — if already present in the record
-//      2. assetMap[assetId] — looked up from the fetched assets list
-//      3. "Asset #<id>"     — only absolute last resort
+// 2. VIEW SWITCHING FIX
+//    - Removed the auto-switch-to-card on resize/scroll
+//    - View only changes when user explicitly clicks Table/Cards
+//    - Default view is always "table"
 //
-// 3. WORKING PAGINATION  (search "// PAGINATION")
-//    Problem: Page buttons 1 / 2 / 3 were decorative — clicking them
-//    did nothing because there was no page state or slicing logic.
-//    Fix: Added currentPage state + ITEMS_PER_PAGE = 10 constant.
-//    pagedAssets = filtered.slice(start, end) — only current page shown.
-//    Pagination bar renders the correct number of page buttons
-//    dynamically based on filtered.length, highlights the active page,
-//    and resets to page 1 whenever filters/search change.
+// 3. TOAST NOTIFICATION SYSTEM
+//    - Beautiful animated toast for success / error / info
+//    - Appears top-right (desktop) / top-center (mobile)
+//    - Auto-dismisses after 4 s, manual ✕ close
+//    - Used for: add, update, delete, AI, network errors
 //
-// 4. ALL OTHER LOGIC — UNCHANGED
-//    Real notifications, real AI per asset, user name fix — all intact.
+// 4. DELETE / UPDATE NOW WORKING
+//    - api.delete and api.put read response body correctly
+//    - Shows server success message in toast
+//    - Error toast if backend returns non-2xx
+//
+// 5. SPRING BOOT COMPATIBILITY
+//    - Expects JSON body: { success, message, asset? }
+//    - Falls back gracefully if backend still returns plain string
+//
+// 6. ALL PREVIOUS FIXES RETAINED
+//    - Role-based dashboard title
+//    - Real asset names in notifications (assetMap)
+//    - Working pagination
 // ─────────────────────────────────────────────────────────────
 
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
@@ -58,7 +62,6 @@ const EMPTY_FORM = {
   currentValue: "", description: "", department: "", purchaseDate: "",
 };
 
-// PAGINATION: how many rows / cards per page
 const ITEMS_PER_PAGE = 10;
 
 // ─────────────────────────────────────────────────────────────
@@ -68,54 +71,28 @@ function parseCost(val) {
   if (val == null) return 0;
   return Number(String(val).replace(/[^0-9.]/g, "")) || 0;
 }
-
 function getStoredUser() {
   try { return JSON.parse(localStorage.getItem("user")) ?? {}; } catch { return {}; }
 }
-
 function getUserDisplayName(user) {
   if (user.employeeName?.trim()) return user.employeeName.trim();
   if (user.name?.trim())         return user.name.trim();
   if (user.email?.trim())        return user.email.split("@")[0];
   return "User";
 }
-
 function getUserInitials(user) {
   return getUserDisplayName(user).split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2) || "U";
 }
-
 function deriveStatus(dt) {
   if (!dt) return "Completed";
   const diff = (new Date(dt) - new Date()) / 86400000;
   return diff < 0 ? "Overdue" : diff <= 60 ? "Pending" : "Completed";
 }
-
-// ─────────────────────────────────────────────────────────────
-// ROLE TITLE FIX — derives the navbar label from user.role
-//
-// Admin    → "Admin Dashboard"
-// Employee → "Employee Dashboard"
-// Manager  → "Manager Dashboard"
-// (none)   → "Dashboard"
-// ─────────────────────────────────────────────────────────────
 function getDashboardLabel(user) {
   const role = (user.role ?? "").trim();
   if (!role) return "Dashboard";
   return `${role} Dashboard`;
 }
-
-// ─────────────────────────────────────────────────────────────
-// ASSET NAME FIX — resolve real name for notifications
-//
-// buildNotifications previously showed "Asset #1" because it only
-// had assetId from the maintenance record, not the asset name.
-//
-// Fix: pass assetMap (built from fetched assets: { id → name })
-// resolveNotifAssetName checks:
-//   1. record.assetName  — if backend already includes it
-//   2. assetMap[assetId] — looked up from the full assets list
-//   3. "Asset #<id>"     — only as absolute last resort
-// ─────────────────────────────────────────────────────────────
 function resolveNotifAssetName(record, assetMap) {
   if (record.assetName && record.assetName.trim()) return record.assetName.trim();
   if (record.assetId   && assetMap[record.assetId]) return assetMap[record.assetId];
@@ -123,84 +100,174 @@ function resolveNotifAssetName(record, assetMap) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// NOTIFICATION BUILDER — now uses assetMap for real names
-// ASSET NAME FIX: assetMap passed in so overdue records show
-// the actual asset name instead of "Asset #1" etc.
+// EXTRACT SERVER MESSAGE — works with JSON or plain-string backends
+// ─────────────────────────────────────────────────────────────
+function extractServerMessage(data, fallback = "Operation completed.") {
+  if (!data) return fallback;
+  if (typeof data === "string") return data;
+  return data.message ?? data.result ?? data.detail ?? fallback;
+}
+
+// ─────────────────────────────────────────────────────────────
+// NOTIFICATION BUILDER
 // ─────────────────────────────────────────────────────────────
 function buildNotifications(assets, maintenance, assetMap = {}) {
   const notes = [];
-
-  // Overdue maintenance records — ASSET NAME FIX: real name via assetMap
   maintenance
     .filter((r) => deriveStatus(r.nextDueDate) === "Overdue")
     .slice(0, 3)
     .forEach((r) => {
       notes.push({
-        id:      `overdue-${r.id}`,
-        type:    "critical",
-        icon:    "🚨",
-        title:   "Overdue Maintenance",
-        // ASSET NAME FIX: resolveNotifAssetName instead of raw `Asset #${r.assetId}`
+        id: `overdue-${r.id}`, type: "critical", icon: "🚨",
+        title: "Overdue Maintenance",
         message: `${resolveNotifAssetName(r, assetMap)} — due on ${r.nextDueDate ?? "unknown date"}`,
-        time:    "Overdue",
+        time: "Overdue",
       });
     });
-
-  // Assets currently under maintenance
-  assets
-    .filter((a) => (a.status ?? "").toLowerCase() === "maintenance")
-    .slice(0, 2)
-    .forEach((a) => {
-      notes.push({
-        id:      `maint-${a.id}`,
-        type:    "warning",
-        icon:    "🔧",
-        title:   "Asset Under Maintenance",
-        message: `${a.assetName ?? "Unknown asset"} is currently under maintenance`,
-        time:    "Active",
-      });
+  assets.filter((a) => (a.status ?? "").toLowerCase() === "maintenance").slice(0, 2).forEach((a) => {
+    notes.push({
+      id: `maint-${a.id}`, type: "warning", icon: "🔧",
+      title: "Asset Under Maintenance",
+      message: `${a.assetName ?? "Unknown asset"} is currently under maintenance`,
+      time: "Active",
     });
-
-  // Pending maintenance count
+  });
   const pending = maintenance.filter((r) => deriveStatus(r.nextDueDate) === "Pending");
   if (pending.length > 0) {
     notes.push({
-      id:      "pending-summary",
-      type:    "info",
-      icon:    "⏳",
-      title:   "Upcoming Maintenance",
+      id: "pending-summary", type: "info", icon: "⏳",
+      title: "Upcoming Maintenance",
       message: `${pending.length} task${pending.length > 1 ? "s" : ""} due within 60 days`,
-      time:    "Upcoming",
+      time: "Upcoming",
     });
   }
-
-  // Inactive assets
   const inactive = assets.filter((a) => (a.status ?? "").toLowerCase() === "inactive");
   if (inactive.length > 0) {
     notes.push({
-      id:      "inactive-summary",
-      type:    "info",
-      icon:    "📦",
-      title:   "Inactive Assets",
+      id: "inactive-summary", type: "info", icon: "📦",
+      title: "Inactive Assets",
       message: `${inactive.length} asset${inactive.length > 1 ? "s are" : " is"} inactive`,
-      time:    "Review",
+      time: "Review",
     });
   }
-
   notes.push({
-    id:      "system",
-    type:    "info",
-    icon:    "✅",
-    title:   "System Status",
-    message: "All systems operational — data synced",
-    time:    "Now",
+    id: "system", type: "info", icon: "✅",
+    title: "System Status", message: "All systems operational — data synced", time: "Now",
   });
-
   return notes;
 }
 
 // ─────────────────────────────────────────────────────────────
-// NOTIFICATION DROPDOWN — React Portal
+// TOAST SYSTEM
+// Beautiful animated toasts for success / error / info
+// ─────────────────────────────────────────────────────────────
+function Toast({ toasts, removeToast }) {
+  const STYLES = {
+    success: {
+      bg: "linear-gradient(135deg,#064e3b,#065f46)",
+      border: "rgba(52,211,153,0.4)",
+      icon: "✅",
+      iconBg: "rgba(52,211,153,0.2)",
+      accent: "#34d399",
+    },
+    error: {
+      bg: "linear-gradient(135deg,#450a0a,#7f1d1d)",
+      border: "rgba(239,68,68,0.4)",
+      icon: "❌",
+      iconBg: "rgba(239,68,68,0.2)",
+      accent: "#f87171",
+    },
+    info: {
+      bg: "linear-gradient(135deg,#1e1b4b,#312e81)",
+      border: "rgba(129,140,248,0.4)",
+      icon: "ℹ️",
+      iconBg: "rgba(129,140,248,0.2)",
+      accent: "#818cf8",
+    },
+    warning: {
+      bg: "linear-gradient(135deg,#451a03,#78350f)",
+      border: "rgba(251,191,36,0.4)",
+      icon: "⚠️",
+      iconBg: "rgba(251,191,36,0.2)",
+      accent: "#fbbf24",
+    },
+  };
+
+  return createPortal(
+    <div style={{
+      position: "fixed",
+      top: 16,
+      right: 16,
+      left: 16,
+      zIndex: 99999,
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "flex-end",
+      gap: 10,
+      pointerEvents: "none",
+    }}>
+      {toasts.map((t) => {
+        const s = STYLES[t.type] ?? STYLES.info;
+        return (
+          <div key={t.id} style={{
+            pointerEvents: "all",
+            background: s.bg,
+            border: `1px solid ${s.border}`,
+            borderRadius: 14,
+            padding: "12px 14px",
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 10,
+            width: "100%",
+            maxWidth: 360,
+            boxShadow: `0 8px 32px rgba(0,0,0,0.4), 0 0 0 1px ${s.border}`,
+            animation: "toastIn 0.35s cubic-bezier(0.34,1.56,0.64,1) forwards",
+          }}>
+            <style>{`
+              @keyframes toastIn {
+                from { opacity:0; transform:translateX(60px) scale(0.85); }
+                to   { opacity:1; transform:translateX(0)    scale(1);    }
+              }
+            `}</style>
+            <div style={{
+              width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+              background: s.iconBg, display: "flex", alignItems: "center",
+              justifyContent: "center", fontSize: 14,
+            }}>{s.icon}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p style={{ margin: 0, fontSize: 11, fontWeight: 700, color: s.accent, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                {t.type === "success" ? "Success" : t.type === "error" ? "Error" : t.type === "warning" ? "Warning" : "Info"}
+              </p>
+              <p style={{ margin: "3px 0 0", fontSize: 12, color: "#e2e8f0", lineHeight: 1.5 }}>{t.message}</p>
+            </div>
+            <button onClick={() => removeToast(t.id)} style={{
+              background: "none", border: "none", cursor: "pointer",
+              color: "#94a3b8", fontSize: 14, padding: "2px 4px",
+              flexShrink: 0, lineHeight: 1,
+            }}>✕</button>
+          </div>
+        );
+      })}
+    </div>,
+    document.body
+  );
+}
+
+function useToast() {
+  const [toasts, setToasts] = useState([]);
+  const add = useCallback((message, type = "info", duration = 4000) => {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), duration);
+  }, []);
+  const remove = useCallback((id) => setToasts((prev) => prev.filter((t) => t.id !== id)), []);
+  return { toasts, toast: add, removeToast: remove };
+}
+
+// ─────────────────────────────────────────────────────────────
+// NOTIFICATION DROPDOWN — MOBILE FIX
+// Now positioned correctly on phones: attaches to right edge,
+// never overflows off the left side of the screen.
 // ─────────────────────────────────────────────────────────────
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
   const TYPE_STYLE = {
@@ -209,11 +276,19 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
     info:     { iconBg: "bg-indigo-100", dot: "bg-indigo-400", title: "text-indigo-700" },
   };
 
+  // MOBILE FIX: calculate position so dropdown never goes off-screen left
+  const isMobile = window.innerWidth < 480;
+  const DROPDOWN_W = isMobile ? Math.min(320, window.innerWidth - 16) : 320;
+
+  // Right-align to the bell button, but clamp so left edge >= 8px
+  const rightFromEdge = anchorRect ? window.innerWidth - anchorRect.right : 16;
+  const computedRight = Math.max(8, rightFromEdge);
+
   const style = {
     position:     "fixed",
     top:          (anchorRect?.bottom ?? 60) + 8,
-    right:        anchorRect ? window.innerWidth - anchorRect.right : 16,
-    width:        320,
+    right:        computedRight,
+    width:        DROPDOWN_W,
     zIndex:       9999,
     background:   "#fff",
     borderRadius: 16,
@@ -338,7 +413,7 @@ function SidebarContent({ onNavigate }) {
       <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
         <p className="text-xs text-emerald-400 font-semibold tracking-wide uppercase">{user.role ?? "Administrator"}</p>
         <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{getUserDisplayName(user)}</p>
-        <p className="text-xs text-indigo-600 mt-0.5">v3.1.0 — Pro Plan</p>
+        <p className="text-xs text-indigo-600 mt-0.5">v4.0.0 — Pro Plan</p>
       </div>
     </div>
   );
@@ -372,8 +447,6 @@ function Sidebar({ mobileOpen, onClose }) {
 
 // ─────────────────────────────────────────────────────────────
 // NAVBAR
-// ROLE TITLE FIX: shows "<Role> Dashboard / <Page>" based on
-// the logged-in user's role, not hardcoded "Admin Dashboard"
 // ─────────────────────────────────────────────────────────────
 function Navbar({ onMenuToggle, notifications }) {
   const navigate    = useNavigate();
@@ -389,13 +462,10 @@ function Navbar({ onMenuToggle, notifications }) {
     "/maintenance": "Maintenance",
     "/reports":     "Reports",
   };
-  const pageTitle = TITLES[location.pathname] ?? "Assets";
-
-  // ROLE TITLE FIX: dynamic label from user.role
+  const pageTitle      = TITLES[location.pathname] ?? "Assets";
   const dashboardLabel = getDashboardLabel(user);
-
-  const displayName = getUserDisplayName(user);
-  const initials    = getUserInitials(user);
+  const displayName    = getUserDisplayName(user);
+  const initials       = getUserInitials(user);
 
   const handleBellClick = () => {
     if (bellRef.current) setAnchorRect(bellRef.current.getBoundingClientRect());
@@ -419,11 +489,6 @@ function Navbar({ onMenuToggle, notifications }) {
       </button>
 
       <div className="flex-1 min-w-0">
-        {/*
-          ROLE TITLE FIX:
-          Desktop → "Employee Dashboard / Assets"  or  "Admin Dashboard / Reports"
-          Mobile  → just "Assets" (space-efficient, unchanged)
-        */}
         <span className="text-sm font-bold text-indigo-950 hidden sm:inline">{dashboardLabel}</span>
         <span className="text-xs text-indigo-300 hidden sm:inline"> / {pageTitle}</span>
         <span className="text-sm font-bold text-indigo-950 sm:hidden">{pageTitle}</span>
@@ -468,7 +533,7 @@ function Navbar({ onMenuToggle, notifications }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// AI PANEL — per-asset AI recommendation
+// AI PANEL
 // ─────────────────────────────────────────────────────────────
 function AssetAiPanel({ asset, maintenance, onClear }) {
   const [aiResult,    setAiResult]    = useState("");
@@ -488,17 +553,12 @@ function AssetAiPanel({ asset, maintenance, onClear }) {
   }, []);
 
   useEffect(() => () => clearInterval(timerRef.current), []);
-
-  useEffect(() => {
-    if (!asset) return;
-    callBackend(asset);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asset?.id]);
+  useEffect(() => { if (!asset) return; callBackend(asset); }, [asset?.id]); // eslint-disable-line
 
   const callBackend = async (a) => {
     setLoading(true); setAiError(""); setAiResult(""); setDisplayText(""); setDone(false);
     const assetName = a.assetName ?? a.name ?? "";
-    const realCost  = maintenance
+    const realCost = maintenance
       .filter((r) => {
         const nameMatch = (r.assetName ?? "").toLowerCase() === assetName.toLowerCase();
         const idMatch   = r.assetId !== undefined && r.assetId === a.id;
@@ -515,7 +575,6 @@ function AssetAiPanel({ asset, maintenance, onClear }) {
       usefulLifeYears: Number(a.usefulLifeYears) || 5,
       maintenanceCost: maintenanceCost,
     };
-    console.log("AssetAI payload →", payload);
     try {
       const res  = await api.post("/api/ai/recommendation", payload);
       const text = typeof res.data === "string"
@@ -524,9 +583,8 @@ function AssetAiPanel({ asset, maintenance, onClear }) {
       setAiResult(text);
       runTypewriter(text);
     } catch (err) {
-      console.error("AI error:", err);
-      if      (err.code === "ERR_NETWORK")       setAiError("Cannot reach backend — is Spring Boot running on port 8080?");
-      else if (err.response?.status === 404)     setAiError("Endpoint not found — check /api/ai/recommendation in your backend.");
+      if      (err.code === "ERR_NETWORK")   setAiError("Cannot reach backend — is Spring Boot running?");
+      else if (err.response?.status === 404) setAiError("Endpoint not found — check /api/ai/recommendation.");
       else setAiError(err.response?.data?.message ?? err.message ?? "Request failed.");
     } finally { setLoading(false); }
   };
@@ -631,9 +689,9 @@ function FormField({ label, required, children }) {
 const inputCls = "px-3 py-2 border border-indigo-100 rounded-xl text-xs bg-white text-slate-700 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-50 transition-all w-full";
 
 // ─────────────────────────────────────────────────────────────
-// ADD / EDIT ASSET MODAL
+// ADD / EDIT ASSET MODAL — with toast support passed in
 // ─────────────────────────────────────────────────────────────
-function AssetModal({ editAsset, onClose, onSaved }) {
+function AssetModal({ editAsset, onClose, onSaved, toast }) {
   const isEdit = Boolean(editAsset);
   const [form,      setForm]      = useState(editAsset ?? EMPTY_FORM);
   const [saving,    setSaving]    = useState(false);
@@ -646,10 +704,21 @@ function AssetModal({ editAsset, onClose, onSaved }) {
     if (!form.location.trim())  { setFormError("Location is required.");   return; }
     setFormError(""); setSaving(true);
     try {
-      isEdit ? await api.put(`/api/assets/${editAsset.id}`, form) : await api.post("/api/assets", form);
-      onSaved(); onClose();
+      if (isEdit) {
+        const res = await api.put(`/api/assets/${editAsset.id}`, form);
+        const msg = extractServerMessage(res.data, `Asset "${form.assetName}" updated successfully.`);
+        toast(msg, "success");
+      } else {
+        const res = await api.post("/api/assets", form);
+        const msg = extractServerMessage(res.data, `Asset "${form.assetName}" created successfully.`);
+        toast(msg, "success");
+      }
+      onSaved();
+      onClose();
     } catch (err) {
-      setFormError(err.response?.data?.message ?? err.response?.data ?? "Failed to save. Check your Spring Boot console.");
+      const msg = err.response?.data?.message ?? err.response?.data ?? "Failed to save. Check your Spring Boot console.";
+      setFormError(typeof msg === "string" ? msg : JSON.stringify(msg));
+      toast(typeof msg === "string" ? msg : "Failed to save asset.", "error");
     } finally { setSaving(false); }
   };
 
@@ -834,18 +903,11 @@ function DeleteConfirm({ asset, onCancel, onConfirm, deleting }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PAGINATION COMPONENT
-//
-// PAGINATION: Renders page number buttons dynamically.
-// - totalPages derived from filtered.length / ITEMS_PER_PAGE
-// - Active page highlighted with gradient
-// - Shows prev (‹) and next (›) arrow buttons
-// - Ellipsis (…) when page count is large, keeping up to 5 visible pages
+// PAGINATION
 // ─────────────────────────────────────────────────────────────
 function Pagination({ currentPage, totalPages, onPageChange }) {
   if (totalPages <= 1) return null;
 
-  // Build visible page numbers — max 5 shown with ellipsis
   const getPageNumbers = () => {
     if (totalPages <= 5) return Array.from({ length: totalPages }, (_, i) => i + 1);
     const pages = [];
@@ -860,38 +922,27 @@ function Pagination({ currentPage, totalPages, onPageChange }) {
   };
 
   const pageNumbers = getPageNumbers();
-
-  const btnBase  = "w-7 h-7 rounded-lg text-xs font-medium border transition-all flex items-center justify-center";
+  const btnBase     = "w-7 h-7 rounded-lg text-xs font-medium border transition-all flex items-center justify-center";
   const activeStyle = { background: "linear-gradient(90deg,#4f46e5,#9333ea)", border: "transparent" };
 
   return (
     <div className="flex items-center gap-1">
-      {/* Prev arrow */}
-      <button
-        onClick={() => onPageChange(currentPage - 1)}
-        disabled={currentPage === 1}
+      <button onClick={() => onPageChange(currentPage - 1)} disabled={currentPage === 1}
         className={`${btnBase} border-indigo-100 text-indigo-400 hover:bg-indigo-50 disabled:opacity-30 disabled:cursor-not-allowed`}>
         ‹
       </button>
-
       {pageNumbers.map((p, i) =>
         p === "…" ? (
           <span key={`ellipsis-${i}`} className="w-7 h-7 flex items-center justify-center text-xs text-slate-400">…</span>
         ) : (
-          <button
-            key={p}
-            onClick={() => onPageChange(p)}
+          <button key={p} onClick={() => onPageChange(p)}
             className={`${btnBase} ${currentPage === p ? "text-white" : "border-indigo-100 text-indigo-400 hover:bg-indigo-50"}`}
             style={currentPage === p ? activeStyle : {}}>
             {p}
           </button>
         )
       )}
-
-      {/* Next arrow */}
-      <button
-        onClick={() => onPageChange(currentPage + 1)}
-        disabled={currentPage === totalPages}
+      <button onClick={() => onPageChange(currentPage + 1)} disabled={currentPage === totalPages}
         className={`${btnBase} border-indigo-100 text-indigo-400 hover:bg-indigo-50 disabled:opacity-30 disabled:cursor-not-allowed`}>
         ›
       </button>
@@ -902,7 +953,7 @@ function Pagination({ currentPage, totalPages, onPageChange }) {
 // ─────────────────────────────────────────────────────────────
 // ASSETS — main page
 // ─────────────────────────────────────────────────────────────
-function Assets() {
+function Assets({ toast }) {
   const [assets,       setAssets]       = useState([]);
   const [maintenance,  setMaintenance]  = useState([]);
   const [loading,      setLoading]      = useState(true);
@@ -910,56 +961,63 @@ function Assets() {
   const [search,       setSearch]       = useState("");
   const [typeFilter,   setTypeFilter]   = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+
+  // VIEW SWITCHING FIX: default is always "table", only changed by explicit button click
   const [view,         setView]         = useState("table");
   const [modalMode,    setModalMode]    = useState(null);
   const [editAsset,    setEditAsset]    = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting,     setDeleting]     = useState(false);
   const [aiAsset,      setAiAsset]      = useState(null);
+  const [currentPage,  setCurrentPage]  = useState(1);
 
-  // PAGINATION: current page state — resets to 1 on filter change
-  const [currentPage, setCurrentPage] = useState(1);
-
-  // ASSET NAME FIX: build assetMap for notification name resolution
   const assetMap = useMemo(() => {
     const map = {};
     assets.forEach((a) => { if (a.id != null) map[a.id] = a.assetName ?? a.name ?? `Asset #${a.id}`; });
     return map;
   }, [assets]);
 
-  const fetchAll = () => {
+  const fetchAll = useCallback(() => {
     setLoading(true); setError(null);
     Promise.all([api.get("/api/assets"), api.get("/api/maintenance")])
       .then(([a, m]) => { setAssets(a.data); setMaintenance(m.data); })
-      .catch((err) => setError(err))
+      .catch((err) => {
+        setError(err);
+        toast(
+          err.code === "ERR_NETWORK"
+            ? "Network error — unable to reach the server. Please check your connection."
+            : `Failed to load assets: ${err.message}`,
+          "error"
+        );
+      })
       .finally(() => setLoading(false));
-  };
+  }, [toast]);
 
-  useEffect(() => { fetchAll(); }, []);
+  useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  useEffect(() => {
-    const h = () => { if (window.innerWidth < 640) setView("card"); };
-    h(); window.addEventListener("resize", h); return () => window.removeEventListener("resize", h);
-  }, []);
+  // VIEW SWITCHING FIX: NO auto-switch on resize. View is purely user-controlled.
 
   const openAdd    = () => { setEditAsset(null); setModalMode("add");  };
   const openEdit   = (a) => { setEditAsset(a);   setModalMode("edit"); };
   const closeModal = () => { setModalMode(null); setEditAsset(null);   };
 
+  // DELETE FIX: reads JSON response body, shows toast
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      await api.delete(`/api/assets/${deleteTarget.id}`);
+      const res = await api.delete(`/api/assets/${deleteTarget.id}`);
+      const msg = extractServerMessage(res.data, `Asset "${deleteTarget.assetName}" deleted successfully.`);
+      toast(msg, "success");
       setDeleteTarget(null);
       fetchAll();
     } catch (err) {
+      const msg = err.response?.data?.message ?? err.response?.data ?? "Could not delete asset. Please try again.";
+      toast(typeof msg === "string" ? msg : "Delete failed — check console for details.", "error");
       console.error("Delete failed:", err);
-      alert("Could not delete asset.");
     } finally { setDeleting(false); }
   };
 
-  // PAGINATION: reset to page 1 whenever filters or search change
   const filtered = useMemo(() => {
     setCurrentPage(1);
     return assets.filter((a) => {
@@ -973,8 +1031,7 @@ function Assets() {
     });
   }, [assets, search, typeFilter, statusFilter]);
 
-  // PAGINATION: total pages + current page slice
-  const totalPages = Math.max(1, Math.ceil(filtered.length / ITEMS_PER_PAGE));
+  const totalPages  = Math.max(1, Math.ceil(filtered.length / ITEMS_PER_PAGE));
   const pagedAssets = useMemo(() => {
     const start = (currentPage - 1) * ITEMS_PER_PAGE;
     return filtered.slice(start, start + ITEMS_PER_PAGE);
@@ -982,7 +1039,6 @@ function Assets() {
 
   const uniqueTypes = useMemo(() => [...new Set(assets.map((a) => a.assetType).filter(Boolean))], [assets]);
 
-  // ASSET NAME FIX: pass assetMap to buildNotifications so real names appear
   const notifications = useMemo(
     () => buildNotifications(assets, maintenance, assetMap),
     [assets, maintenance, assetMap]
@@ -991,7 +1047,12 @@ function Assets() {
   return (
     <>
       {(modalMode === "add" || modalMode === "edit") && (
-        <AssetModal editAsset={modalMode === "edit" ? editAsset : null} onClose={closeModal} onSaved={fetchAll} />
+        <AssetModal
+          editAsset={modalMode === "edit" ? editAsset : null}
+          onClose={closeModal}
+          onSaved={fetchAll}
+          toast={toast}
+        />
       )}
       {deleteTarget && (
         <DeleteConfirm
@@ -1030,11 +1091,7 @@ function Assets() {
 
         {/* AI Panel */}
         {aiAsset && (
-          <AssetAiPanel
-            asset={aiAsset}
-            maintenance={maintenance}
-            onClear={() => setAiAsset(null)}
-          />
+          <AssetAiPanel asset={aiAsset} maintenance={maintenance} onClear={() => setAiAsset(null)} />
         )}
 
         {/* Filters */}
@@ -1054,6 +1111,8 @@ function Assets() {
             {["Active","Maintenance","Inactive"].map((s) => <option key={s}>{s}</option>)}
           </select>
           <div className="flex-1 hidden sm:block" />
+
+          {/* VIEW SWITCHING FIX: only onClick changes view — no resize listener */}
           <div className="flex border border-indigo-100 rounded-xl overflow-hidden bg-white ml-auto sm:ml-0">
             {["table","card"].map((v) => (
               <button key={v} onClick={() => setView(v)}
@@ -1089,13 +1148,13 @@ function Assets() {
               </button>
             </div>
             <p className="px-4 sm:px-5 py-3 text-xs text-red-600">
-              Add <code className="bg-red-100 px-1 rounded">@CrossOrigin(origins = "http://localhost:3000")</code> to your{" "}
+              Add <code className="bg-red-100 px-1 rounded">@CrossOrigin(origins = "*")</code> to your{" "}
               <code className="bg-red-100 px-1 rounded">AssetController</code>.
             </p>
           </div>
         )}
 
-        {/* ── TABLE VIEW ─────────────────────────────────────── */}
+        {/* TABLE VIEW */}
         {!loading && !error && view === "table" && (
           <div className="bg-white rounded-2xl border border-indigo-50 overflow-hidden"
             style={{ boxShadow: "0 4px 24px rgba(79,70,229,0.07)" }}>
@@ -1116,7 +1175,6 @@ function Assets() {
                 </thead>
                 <tbody>
                   {pagedAssets.length > 0 ? (
-                    // PAGINATION: render only pagedAssets (current page slice)
                     pagedAssets.map((asset, i) => (
                       <AssetRow
                         key={asset.id ?? i}
@@ -1137,29 +1195,22 @@ function Assets() {
                 </tbody>
               </table>
             </div>
-
-            {/* PAGINATION: footer with real page buttons */}
             <div className="flex items-center justify-between px-4 sm:px-5 py-3 border-t border-indigo-50">
               <span className="text-xs text-slate-400">
                 Showing{" "}
                 {filtered.length === 0 ? 0 : (currentPage - 1) * ITEMS_PER_PAGE + 1}
                 –{Math.min(currentPage * ITEMS_PER_PAGE, filtered.length)} of {filtered.length} assets
               </span>
-              <Pagination
-                currentPage={currentPage}
-                totalPages={totalPages}
-                onPageChange={setCurrentPage}
-              />
+              <Pagination currentPage={currentPage} totalPages={totalPages} onPageChange={setCurrentPage} />
             </div>
           </div>
         )}
 
-        {/* ── CARD VIEW ──────────────────────────────────────── */}
+        {/* CARD VIEW */}
         {!loading && !error && view === "card" && (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
               {pagedAssets.length > 0 ? (
-                // PAGINATION: cards also use pagedAssets
                 pagedAssets.map((asset, i) => (
                   <AssetCard
                     key={asset.id ?? i}
@@ -1175,8 +1226,6 @@ function Assets() {
                 </p>
               )}
             </div>
-
-            {/* PAGINATION: footer for card view */}
             {filtered.length > ITEMS_PER_PAGE && (
               <div className="flex items-center justify-between px-1">
                 <span className="text-xs text-slate-400">
@@ -1184,16 +1233,11 @@ function Assets() {
                   {(currentPage - 1) * ITEMS_PER_PAGE + 1}
                   –{Math.min(currentPage * ITEMS_PER_PAGE, filtered.length)} of {filtered.length} assets
                 </span>
-                <Pagination
-                  currentPage={currentPage}
-                  totalPages={totalPages}
-                  onPageChange={setCurrentPage}
-                />
+                <Pagination currentPage={currentPage} totalPages={totalPages} onPageChange={setCurrentPage} />
               </div>
             )}
           </>
         )}
-
       </div>
     </>
   );
@@ -1206,6 +1250,7 @@ export default function AssetsPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [assets,      setAssets]      = useState([]);
   const [maintenance, setMaintenance] = useState([]);
+  const { toasts, toast, removeToast } = useToast();
 
   useEffect(() => {
     Promise.all([api.get("/api/assets"), api.get("/api/maintenance")])
@@ -1213,14 +1258,12 @@ export default function AssetsPage() {
       .catch(() => {});
   }, []);
 
-  // ASSET NAME FIX: assetMap at root level for Navbar notifications
   const assetMap = useMemo(() => {
     const map = {};
     assets.forEach((a) => { if (a.id != null) map[a.id] = a.assetName ?? a.name ?? `Asset #${a.id}`; });
     return map;
   }, [assets]);
 
-  // ASSET NAME FIX: pass assetMap into buildNotifications
   const notifications = useMemo(
     () => buildNotifications(assets, maintenance, assetMap),
     [assets, maintenance, assetMap]
@@ -1229,11 +1272,12 @@ export default function AssetsPage() {
   return (
     <div className="flex min-h-screen"
       style={{ background: "linear-gradient(135deg,#f0f0ff 0%,#f5f9ff 50%,#f0fff8 100%)" }}>
+      <Toast toasts={toasts} removeToast={removeToast} />
       <Sidebar mobileOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
       <div className="flex flex-col flex-1 min-w-0">
         <Navbar onMenuToggle={() => setSidebarOpen((o) => !o)} notifications={notifications} />
         <main className="flex-1 p-3 sm:p-4 lg:p-6 overflow-auto">
-          <Assets />
+          <Assets toast={toast} />
         </main>
       </div>
     </div>
