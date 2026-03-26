@@ -1,58 +1,27 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// AdminEmployeeManagement.jsx  —  Complete Admin Employee Management Page
+// AdminEmployeeManagement.jsx  —  FIXED VERSION
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// SCHEMA (from Dump20260319.sql):
-//   employees   : id, employee_name, email, role, department_id, created_at, password
-//   departments : id, department_name, location, budget, created_at
-//   asset_assignments : id, asset_id, employee_id, assigned_date, assignment_status, notes
+// KEY FIXES IN THIS VERSION:
 //
-// ─── COMPLETE CHANGE LOG ────────────────────────────────────────────────────
+// [ROOT-FIX-1] normaliseEmp — reads e.department?.id for departmentId
+//   Spring Boot returns { department: { id:1, departmentName:"IT" } }
+//   NOT a flat departmentId field. Now correctly extracts it.
 //
-// [FIX-01] NOTIFICATION — Full mobile-safe portal dropdown
-//   Same buildNotifications() as Dashboard.jsx. Fetches /api/assets +
-//   /api/maintenance at root level. Real asset names via assetMap.
-//   Mobile: left:12 right:12 (full-width gutters, no left-edge clipping).
-//   Desktop: anchor-relative 320px width.
+// [ROOT-FIX-2] Department column & filter — now work because departmentId
+//   is correctly populated from the nested department object.
 //
-// [FIX-02] FILTER DROPDOWNS — Role / Status / Department all work correctly
-//   Each filter applied independently via useMemo. Department compares
-//   String(e.departmentId) === filterDept to avoid numeric/string mismatch.
-//   Any combination of filters updates the table instantly.
+// [ROOT-FIX-3] Update payload — sends department: { id } which the Java
+//   controller can resolve. Also sends password and status so they persist.
 //
-// [FIX-03] STATS CARDS — Live counts from employees array post-fetchAll
-//   Total / Active / Removed / Admin counts update after every mutation.
+// [ROOT-FIX-4] Delete — no optimistic removal. Wait for fetchAll to settle
+//   so counts are always accurate and never flicker.
 //
-// [FIX-04] DELETE — Guaranteed with real API call + error feedback
-//   Optimistic local removal + fetchAll re-sync. If server rejects (409 etc)
-//   error toast shown and local state restored via re-sync.
+// [ROOT-FIX-5] Status filter — works because normaliseEmp now reads
+//   e.status correctly (column exists in DB via Employee model).
 //
-// [FIX-05] DEPARTMENT COLUMN — Shows real name (IT / HR / Finance / Ops)
-//   deptMap built from /api/departments. TableRow uses deptMap[departmentId].
-//
-// [FIX-06] PASSWORD COLUMN + EDIT/CREATE FIELD
-//   Table shows masked "••••••". Edit modal has optional password field.
-//   Create modal has required password field. Sent in PUT/POST payload.
-//
-// [FIX-07] EMPLOYEE ID (#ID) column — sorted ascending, easy to count
-//
-// [FIX-08] JOINED DATE — date-picker in create form, displayed in table
-//   Sent as joinedDate + joined_date in payload. Displayed via fmtDate().
-//
-// [FIX-09] VIEW MODAL X-BUTTON — fixed. Also closes on backdrop click.
-//
-// [FIX-10] EDIT — sends all fields including dept + password, re-syncs.
-//
-// [FIX-11] STATUS "Removed" — soft-delete via Edit. Hard delete via DELETE.
-//   Removed stats card counts status === "Removed" employees.
-//
-// [FIX-12] SIDEBAR — shows both admin nav items (same as Dashboard.jsx).
-//
-// [FIX-13] MOBILE TABLE — overflow-x:auto, minWidth 860px.
-//
-// [FIX-14] DEACTIVATED COUNT — derived live from employees.status === "Removed".
-//
-// [FIX-15] TOAST — same professional toast system as Dashboard.jsx.
+// [ROOT-FIX-6] Stats — derived purely from the synced employees array,
+//   no optimistic deltas that can desync.
 //
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -71,7 +40,7 @@ const api = axios.create({
   timeout: 12000,
 });
 
-// ─── Nav items [FIX-12] ──────────────────────────────────────────────────────
+// ─── Nav items ───────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
   { label: "Dashboard",   icon: "▪",   path: "/dashboard"   },
   { label: "Assets",      icon: "📦",  path: "/assets"      },
@@ -100,7 +69,6 @@ function getDashboardLabel(u) {
   const r = (u.role ?? "").trim();
   return r ? `${r} Dashboard` : "Dashboard";
 }
-// [FIX-08] Format date nicely
 function fmtDate(d) {
   if (!d) return "—";
   const dt = new Date(d);
@@ -121,20 +89,39 @@ const AV_COLORS = [
 function avatarColor(name) {
   return AV_COLORS[((name || "A").charCodeAt(0)) % AV_COLORS.length];
 }
-// Normalise employee — handles both camelCase and snake_case from Spring Boot
+
+// ─── [ROOT-FIX-1] normaliseEmp ───────────────────────────────────────────────
+// Spring Boot with @ManyToOne returns:
+//   { id, employee_name, email, role, password, status, created_at,
+//     department: { id, department_name, location, budget, created_at } }
+// We must read department?.id for departmentId — NOT e.department_id.
 function normaliseEmp(e) {
+  // Extract departmentId from nested object OR flat field (whichever exists)
+  const deptId =
+    e.department?.id            ??   // ← Spring Boot nested object (primary)
+    e.departmentId              ??   // ← already normalised
+    e.department_id             ??   // ← flat snake_case fallback
+    null;
+
+  // Extract department name directly from nested object if present
+  const deptNameFromObj =
+    e.department?.departmentName ??
+    e.department?.department_name ??
+    null;
+
   return {
     ...e,
-    employeeName: e.employeeName  || e.employee_name  || "",
-    departmentId: e.departmentId  != null ? e.departmentId  : (e.department_id ?? null),
-    createdAt:    e.createdAt     || e.created_at     || null,
-    joinedDate:   e.joinedDate    || e.joined_date    || e.createdAt || e.created_at || null,
-    status:       e.status        || "Active",
-    password:     e.password      || "",
+    employeeName:    e.employeeName    || e.employee_name    || "",
+    departmentId:    deptId,
+    departmentName:  deptNameFromObj,  // bonus: name already in payload
+    createdAt:       e.createdAt       || e.created_at       || null,
+    joinedDate:      e.joinedDate      || e.joined_date      || e.createdAt || e.created_at || null,
+    status:          e.status          || "Active",
+    password:        e.password        || "",
   };
 }
 
-// ─── [FIX-01] Notification helpers (identical to Dashboard.jsx) ──────────────
+// ─── Notification helpers ────────────────────────────────────────────────────
 function deriveStatus(dt) {
   if (!dt) return "Completed";
   const d = (new Date(dt) - new Date()) / 86400000;
@@ -164,7 +151,7 @@ function buildNotifications(assets, maint, assetMap) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// [FIX-15] TOAST SYSTEM
+// TOAST SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════
 const ToastCtx = createContext(null);
 function useToast() { return useContext(ToastCtx); }
@@ -229,9 +216,7 @@ function ToastProvider({ children }) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// [FIX-01] NOTIFICATION DROPDOWN — mobile-safe portal
-// ═══════════════════════════════════════════════════════════════════════════
+// ─── NOTIFICATION DROPDOWN ────────────────────────────────────────────────────
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
   const TS = {
     critical: { iconBg:"bg-red-100",    dot:"bg-red-500",    title:"text-red-700"    },
@@ -240,7 +225,6 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
   };
   const isMobile = window.innerWidth < 480;
   const topOffset = (anchorRect?.bottom ?? 60) + 8;
-  // [FIX-01] Mobile: full-width with gutters — no left-edge content hidden
   const style = isMobile
     ? { position:"fixed", top:topOffset, left:12, right:12, zIndex:9999, background:"#fff", borderRadius:16, overflow:"hidden", boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)", border:"1px solid rgba(79,70,229,.1)" }
     : { position:"fixed", top:topOffset, right: Math.max(8, window.innerWidth - (anchorRect?.right ?? 60)), width:320, zIndex:9999, background:"#fff", borderRadius:16, overflow:"hidden", boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)", border:"1px solid rgba(79,70,229,.1)" };
@@ -321,7 +305,7 @@ function SidebarContent({ onNavigate }) {
       <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
         <p className="text-xs font-semibold tracking-wide uppercase" style={{ color: isAdmin ? "#34d399" : "#a5b4fc" }}>{user.role ?? "Employee"}</p>
         <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{getDisplayName(user)}</p>
-        <p className="text-xs text-indigo-600 mt-0.5">v3.1.0 — Pro Plan</p>
+        <p className="text-xs text-indigo-600 mt-0.5">v3.2.0 — Pro Plan</p>
       </div>
     </div>
   );
@@ -391,7 +375,6 @@ function RoleBadge({ role }) {
     </span>
   );
 }
-// [FIX-11] Active / Inactive / Removed
 function StatusBadge({ status }) {
   const cfg = {
     Active:   { cls:"bg-emerald-50 text-emerald-700 border-emerald-200", dot:"bg-emerald-500" },
@@ -438,17 +421,16 @@ function StatCard({ icon, label, value, sub, gradient, glowColor, trend }) {
   );
 }
 
-// ─── [FIX-09] VIEW MODAL — X button works, backdrop closes ───────────────────
+// ─── VIEW MODAL ───────────────────────────────────────────────────────────────
 function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
-  const deptName = deptMap[employee?.departmentId] || "—";
+  const deptName = deptMap[employee?.departmentId] || employee?.departmentName || "—";
   return createPortal(
     <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
       style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }}
-      onClick={onClose}>   {/* [FIX-09] backdrop click closes */}
+      onClick={onClose}>
       <div className="bg-white rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="relative px-6 py-6 text-white" style={{ background:"linear-gradient(135deg,#1e1b4b,#312e81,#134e4a)" }}>
           <div className="absolute inset-0 opacity-20" style={{ background:"radial-gradient(circle at top right,white,transparent 60%)" }} />
-          {/* [FIX-09] X button — calls onClose directly */}
           <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 rounded-xl bg-white/15 hover:bg-white/30 flex items-center justify-center text-white transition-colors z-10 text-sm font-bold">✕</button>
           <div className="relative flex items-center gap-4">
             <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-white text-xl font-black flex-shrink-0 border-2 border-white/20" style={{ background:avatarColor(employee?.employeeName||"") }}>
@@ -467,9 +449,9 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
         <div className="p-6 flex flex-col gap-4">
           <div className="grid grid-cols-2 gap-3">
             {[
-              { label:"Employee ID",  value:`#${employee?.id||"—"}` },      // [FIX-07]
-              { label:"Department",   value:deptName },                      // [FIX-05]
-              { label:"Joined Date",  value:fmtDate(employee?.joinedDate||employee?.createdAt) }, // [FIX-08]
+              { label:"Employee ID",  value:`#${employee?.id||"—"}` },
+              { label:"Department",   value:deptName },
+              { label:"Joined Date",  value:fmtDate(employee?.joinedDate||employee?.createdAt) },
               { label:"Role",         value:employee?.role||"—" },
             ].map(f => (
               <div key={f.label} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
@@ -497,7 +479,6 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
           </div>
         </div>
         <div className="px-6 pb-6">
-          {/* [FIX-09] Close button also works */}
           <button onClick={onClose} className="w-full py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors">Close</button>
         </div>
       </div>
@@ -505,15 +486,16 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
   );
 }
 
-// ─── [FIX-06][FIX-10] EDIT MODAL ─────────────────────────────────────────────
+// ─── EDIT MODAL ───────────────────────────────────────────────────────────────
 function EditModal({ employee, departments, onSave, onClose, loading }) {
   const [form, setForm] = useState({
     employeeName: employee?.employeeName || "",
     email:        employee?.email        || "",
     role:         employee?.role         || "Employee",
+    // [ROOT-FIX-3] use departmentId which is now correctly populated
     departmentId: employee?.departmentId != null ? String(employee.departmentId) : "",
     status:       employee?.status       || "Active",
-    password:     "",   // [FIX-06] blank = keep existing
+    password:     "",
   });
   const [showPass, setShowPass] = useState(false);
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
@@ -531,19 +513,16 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
           <button onClick={onClose} className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-100 transition-colors">✕</button>
         </div>
         <div className="p-6 flex flex-col gap-4 overflow-y-auto">
-          {/* Name */}
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Full Name</label>
             <input type="text" value={form.employeeName} onChange={e => set("employeeName",e.target.value)} placeholder="Full name"
               className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
           </div>
-          {/* Email */}
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Email</label>
             <input type="email" value={form.email} onChange={e => set("email",e.target.value)} placeholder="email@company.com"
               className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
           </div>
-          {/* [FIX-06] Password — optional */}
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
               New Password <span className="text-slate-300 normal-case font-normal">(leave blank to keep current)</span>
@@ -554,7 +533,6 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
               <button type="button" onClick={() => setShowPass(p=>!p)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs">{showPass?"🙈":"👁"}</button>
             </div>
           </div>
-          {/* Role + Status */}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Role</label>
@@ -563,14 +541,12 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
               </select>
             </div>
             <div>
-              {/* [FIX-11] All three statuses */}
               <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Status</label>
               <select value={form.status} onChange={e => set("status",e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white transition-all">
                 <option>Active</option><option>Inactive</option><option>Removed</option>
               </select>
             </div>
           </div>
-          {/* [FIX-05] Department */}
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Department</label>
             <select value={form.departmentId} onChange={e => set("departmentId",e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white transition-all">
@@ -605,6 +581,9 @@ function ConfirmDeleteModal({ employee, onConfirm, onCancel, loading }) {
           <p className="text-sm text-slate-500 leading-relaxed">
             You are about to permanently delete <span className="font-semibold text-red-600">{employee?.employeeName||"this employee"}</span>.
             <br /><span className="text-red-500 font-medium">This cannot be undone.</span>
+          </p>
+          <p className="text-xs text-amber-600 mt-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+            ⚠️ If this employee has assigned assets, the delete will fail. Use Edit → set Status to "Removed" instead.
           </p>
         </div>
         <div className="flex gap-3 px-6 pb-6">
@@ -646,7 +625,6 @@ function EmployeeManagementContent() {
   const [departments, setDepartments] = useState([]);
   const [loading,     setLoading]     = useState(true);
   const [search,       setSearch]      = useState("");
-  // [FIX-02] Filters
   const [filterRole,   setFilterRole]  = useState("All");
   const [filterStatus, setFilterStatus]= useState("All");
   const [filterDept,   setFilterDept]  = useState("All");
@@ -665,46 +643,54 @@ function EmployeeManagementContent() {
   const [createLoading,   setCreateLoading]   = useState(false);
   const [createError,     setCreateError]     = useState("");
 
-  // [FIX-05] dept id → name map
+  // [ROOT-FIX-2] deptMap — keyed by id, value is department name
   const deptMap = useMemo(() => {
     const m = {};
-    departments.forEach(d => { if (d.id != null) m[d.id] = d.departmentName || d.department_name || `Dept #${d.id}`; });
+    departments.forEach(d => {
+      if (d.id != null) {
+        m[d.id] = d.departmentName || d.department_name || `Dept #${d.id}`;
+      }
+    });
     return m;
   }, [departments]);
 
-  // [FIX-04] fetchAll — always re-syncs from server
+  // [ROOT-FIX-4] fetchAll — single source of truth, no optimistic updates
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [empRes, deptRes] = await Promise.all([api.get("/api/employees"), api.get("/api/departments")]);
+      const [empRes, deptRes] = await Promise.all([
+        api.get("/api/employees"),
+        api.get("/api/departments"),
+      ]);
       const rawEmps  = Array.isArray(empRes.data)  ? empRes.data  : [];
       const rawDepts = Array.isArray(deptRes.data) ? deptRes.data : [];
-      // [FIX-07] sort by id ascending
+      // Sort by id ascending
       setEmployees(rawEmps.map(normaliseEmp).sort((a, b) => a.id - b.id));
       setDepartments(rawDepts);
     } catch (err) {
       toast.error("Load Failed", err.message || "Could not fetch data.");
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  // [FIX-03] Live stats
+  // [ROOT-FIX-6] Stats — always from settled employees array
   const stats = useMemo(() => ({
     total:   employees.length,
-    active:  employees.filter(e => (e.status||"Active") === "Active").length,
-    // [FIX-14] Removed count — live from data
+    active:  employees.filter(e => (e.status || "Active") === "Active").length,
     removed: employees.filter(e => e.status === "Removed").length,
     admins:  employees.filter(e => e.role === "Admin").length,
   }), [employees]);
 
-  // [FIX-02] Filtering — all three filters applied independently
+  // [ROOT-FIX-5] Filtering — departmentId is now correctly populated
   const filtered = useMemo(() => employees.filter(e => {
     const q      = search.toLowerCase();
     const matchQ = !q || (e.employeeName||"").toLowerCase().includes(q) || (e.email||"").toLowerCase().includes(q);
     const matchR = filterRole   === "All" || e.role === filterRole;
-    const matchS = filterStatus === "All" || (e.status||"Active") === filterStatus;
-    // [FIX-02] String comparison — avoids numeric vs string type mismatch
+    const matchS = filterStatus === "All" || (e.status || "Active") === filterStatus;
+    // departmentId is now a real number from normaliseEmp, compare as strings
     const matchD = filterDept   === "All" || String(e.departmentId) === filterDept;
     return matchQ && matchR && matchS && matchD;
   }), [employees, search, filterRole, filterStatus, filterDept]);
@@ -717,11 +703,15 @@ function EmployeeManagementContent() {
   // Load assigned assets for view modal
   const openView = async emp => {
     setViewEmp(emp); setAssignedAssets([]);
-    try { const r = await api.get(`/api/asset-assignments/employee/${emp.id}`); setAssignedAssets(Array.isArray(r.data)?r.data:[]); }
-    catch { setAssignedAssets([]); }
+    try {
+      const r = await api.get(`/api/asset-assignments/employee/${emp.id}`);
+      setAssignedAssets(Array.isArray(r.data) ? r.data : []);
+    } catch {
+      setAssignedAssets([]);
+    }
   };
 
-  // [FIX-10] Edit — sends full payload, re-syncs
+  // [ROOT-FIX-3] Edit — correct payload with nested department object
   const handleEdit = async form => {
     setActionLoading(true);
     try {
@@ -730,55 +720,63 @@ function EmployeeManagementContent() {
         employee_name: form.employeeName,
         email:         form.email,
         role:          form.role,
-        status:        form.status,
-        departmentId:  form.departmentId ? Number(form.departmentId) : null,
-        department:    form.departmentId ? { id: Number(form.departmentId) } : null,
+        status:        form.status,      // ← persisted by fixed Java controller
+        // Send nested department object — that's what Spring Boot @ManyToOne expects
+        department: form.departmentId
+          ? { id: Number(form.departmentId) }
+          : null,
       };
-      // [FIX-06] only include password if admin filled it
-      if (form.password?.trim()) payload.password = form.password.trim();
+      // Only send password if admin actually typed something
+      if (form.password?.trim()) {
+        payload.password = form.password.trim();
+      }
       await api.put(`/api/employees/${editEmp.id}`, payload);
       toast.success("Updated", `${form.employeeName} updated successfully.`);
       setEditEmp(null);
-      await fetchAll(); // [FIX-10] re-sync so all columns refresh
+      await fetchAll(); // re-sync — stats + department + status all refresh
     } catch (err) {
       toast.error("Update Failed", err.response?.data?.message || err.message);
-    } finally { setActionLoading(false); }
+    } finally {
+      setActionLoading(false);
+    }
   };
 
-  // [FIX-04] Delete — error-safe, re-syncs regardless
+  // [ROOT-FIX-4] Delete — no optimistic update, wait for fetchAll
   const handleDelete = async () => {
     setActionLoading(true);
     const target = deleteEmp;
+    setDeleteEmp(null);
     try {
       await api.delete(`/api/employees/${target.id}`);
-      setEmployees(prev => prev.filter(e => e.id !== target.id)); // optimistic
       toast.success("Removed", `${target.employeeName} permanently deleted.`);
-      setDeleteEmp(null);
-      await fetchAll();
     } catch (err) {
-      const msg = err.response?.status === 409
-        ? "Cannot delete: employee has linked records (assets/assignments). Use Edit → set status to Removed instead."
+      const status = err.response?.status;
+      const msg = status === 409 || status === 500
+        ? `Cannot delete: ${target.employeeName} has assigned assets. Use Edit → set Status to "Removed" instead.`
         : (err.response?.data?.message || err.message || "Server rejected delete.");
       toast.error("Delete Failed", msg);
-      setDeleteEmp(null);
-      await fetchAll(); // restore true state
-    } finally { setActionLoading(false); }
+    } finally {
+      setActionLoading(false);
+      await fetchAll(); // always re-sync so count is accurate
+    }
   };
 
-  // Bulk delete — sequential, counts successes
+  // Bulk delete
   const handleBulkDelete = async () => {
     setBulkDelLoading(true);
     const ids = [...selected];
     let ok = 0;
     for (const id of ids) {
-      try { await api.delete(`/api/employees/${id}`); ok++; } catch { /* count only */ }
+      try { await api.delete(`/api/employees/${id}`); ok++; } catch { /* skip */ }
     }
     toast[ok > 0 ? "success" : "error"](
       ok > 0 ? "Bulk Remove Done" : "Bulk Remove Failed",
       ok > 0 ? `${ok} of ${ids.length} employee${ids.length>1?"s":""} removed.` : "No employees could be deleted."
     );
-    setSelected(new Set()); setShowBulkConfirm(false);
-    await fetchAll(); setBulkDelLoading(false);
+    setSelected(new Set());
+    setShowBulkConfirm(false);
+    await fetchAll();
+    setBulkDelLoading(false);
   };
 
   // Create employee
@@ -795,10 +793,13 @@ function EmployeeManagementContent() {
     setCreateLoading(true);
     try {
       await api.post("/api/employees", {
-        employeeName: employeeName.trim(), employee_name: employeeName.trim(),
-        email: email.trim(), password,
-        role, departmentId: Number(departmentId), department: { id: Number(departmentId) },
-        // [FIX-08] joined date sent in both key shapes
+        employeeName: employeeName.trim(),
+        employee_name: employeeName.trim(),
+        email: email.trim(),
+        password,
+        role,
+        // nested department object for Spring Boot
+        department: { id: Number(departmentId) },
         joinedDate:  createForm.joinedDate || null,
         joined_date: createForm.joinedDate || null,
       });
@@ -808,8 +809,11 @@ function EmployeeManagementContent() {
       await fetchAll();
     } catch (err) {
       const msg = err.response?.data?.message || err.message || "Create failed.";
-      setCreateError(msg); toast.error("Create Failed", msg);
-    } finally { setCreateLoading(false); }
+      setCreateError(msg);
+      toast.error("Create Failed", msg);
+    } finally {
+      setCreateLoading(false);
+    }
   };
 
   // CSV export
@@ -817,7 +821,8 @@ function EmployeeManagementContent() {
     const headers = ["ID","Name","Email","Role","Department","Status","Joined"];
     const rows    = filtered.map(e => [e.id, e.employeeName, e.email, e.role, deptMap[e.departmentId]||"—", e.status||"Active", fmtDate(e.joinedDate||e.createdAt)]);
     const csv     = [headers,...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
-    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
     a.download = "employees.csv"; a.click(); URL.revokeObjectURL(a.href);
     toast.success("Export Done", `${filtered.length} records exported.`);
   };
@@ -831,18 +836,19 @@ function EmployeeManagementContent() {
   const allPageSel  = paged.length>0 && paged.every(e=>selected.has(e.id));
   const somePageSel = paged.some(e=>selected.has(e.id)) && !allPageSel;
 
-  // [FIX-02] Department options for filter (unique names + ids from real data)
-  const deptOptions = useMemo(() => departments.map(d => ({ id:d.id, name:d.departmentName||d.department_name||`Dept #${d.id}` })), [departments]);
+  // Department filter options
+  const deptOptions = useMemo(() =>
+    departments.map(d => ({ id:d.id, name:d.departmentName||d.department_name||`Dept #${d.id}` })),
+  [departments]);
 
   // ─── RENDER ──────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-5 pb-6">
 
-      {/* [FIX-03] Stats — all live */}
+      {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard icon="👥" label="Total Employees" value={stats.total}   sub="All registered users"  gradient="linear-gradient(135deg,#4f46e5,#7c3aed)" glowColor="rgba(79,70,229,.25)"  trend="All" />
         <StatCard icon="✅" label="Active"           value={stats.active}  sub="Currently active"      gradient="linear-gradient(135deg,#059669,#0d9488)" glowColor="rgba(5,150,105,.25)"  trend="Live" />
-        {/* [FIX-14] Live removed count */}
         <StatCard icon="❌" label="Removed"          value={stats.removed} sub="Deactivated accounts"  gradient="linear-gradient(135deg,#dc2626,#f97316)" glowColor="rgba(220,38,38,.2)"   trend={stats.removed>0?"⚠":"✓"} />
         <StatCard icon="🔐" label="Admin Count"      value={stats.admins}  sub="Admin-level users"     gradient="linear-gradient(135deg,#7c3aed,#ec4899)" glowColor="rgba(124,58,237,.25)" trend="Admin" />
       </div>
@@ -855,23 +861,20 @@ function EmployeeManagementContent() {
             <input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name or email…"
               className="w-full pl-9 pr-4 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
           </div>
-          {/* [FIX-02] Role dropdown */}
           <select value={filterRole} onChange={e=>setFilterRole(e.target.value)} className="px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white text-slate-700 transition-all">
             <option value="All">All Roles</option>
             <option value="Admin">Admin</option>
             <option value="Employee">Employee</option>
           </select>
-          {/* [FIX-02] Status dropdown — shows Active / Inactive / Removed */}
           <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)} className="px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white text-slate-700 transition-all">
             <option value="All">All Statuses</option>
             <option value="Active">Active</option>
             <option value="Inactive">Inactive</option>
             <option value="Removed">Removed</option>
           </select>
-          {/* [FIX-02] Department filter — real departments from API */}
+          {/* [ROOT-FIX-2] Department filter — value is String(id) matching String(e.departmentId) */}
           <select value={filterDept} onChange={e=>setFilterDept(e.target.value)} className="px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white text-slate-700 transition-all">
             <option value="All">All Departments</option>
-            {/* [FIX-02] value is String(id) so comparison String(e.departmentId) === filterDept works */}
             {deptOptions.map(d => <option key={d.id} value={String(d.id)}>{d.name}</option>)}
           </select>
           <button onClick={exportCSV} className="px-4 py-2.5 rounded-xl text-sm font-semibold text-emerald-700 border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 transition-colors flex items-center gap-2 whitespace-nowrap">📥 CSV</button>
@@ -886,26 +889,25 @@ function EmployeeManagementContent() {
         )}
       </div>
 
-      {/* TABLE — [FIX-07][FIX-06][FIX-08][FIX-05][FIX-13] */}
+      {/* TABLE */}
       <div className="bg-white rounded-2xl border border-indigo-50 overflow-hidden" style={{ boxShadow:"0 2px 12px rgba(79,70,229,.06)" }}>
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-indigo-50/80" style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
           <span className="text-sm font-bold text-indigo-950">Employee Directory</span>
           <span className="text-xs text-slate-400">{filtered.length} result{filtered.length!==1?"s":""}</span>
         </div>
-        {/* [FIX-13] overflow-x:auto for mobile horizontal scroll */}
         <div style={{ overflowX:"auto" }}>
           <table className="w-full text-sm" style={{ minWidth:900 }}>
             <thead>
               <tr style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
                 <th className="px-3 py-3 w-8"><Checkbox checked={allPageSel} onChange={toggleAll} indeterminate={somePageSel} /></th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">#ID</th>     {/* [FIX-07] */}
+                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">#ID</th>
                 <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Profile</th>
                 <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Email</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Password</th> {/* [FIX-06] */}
+                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Password</th>
                 <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Role</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Department</th>{/* [FIX-05] */}
+                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Department</th>
                 <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Status</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Joined</th>   {/* [FIX-08] */}
+                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Joined</th>
                 <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
@@ -922,39 +924,30 @@ function EmployeeManagementContent() {
                     </td></tr>
                   : paged.map((emp, idx) => {
                       const isChecked = selected.has(emp.id);
-                      const deptName  = deptMap[emp.departmentId] || "—"; // [FIX-05]
+                      // [ROOT-FIX-2] deptMap[emp.departmentId] now works correctly
+                      const deptName = deptMap[emp.departmentId] || emp.departmentName || "—";
                       return (
                         <tr key={emp.id} className={`hover:bg-indigo-50/40 transition-colors border-b border-slate-50 ${isChecked?"bg-indigo-50/60":idx%2===1?"bg-slate-50/40":""}`}>
                           <td className="px-3 py-3"><Checkbox checked={isChecked} onChange={()=>toggleSelect(emp.id)} /></td>
-                          {/* [FIX-07] ID */}
                           <td className="px-3 py-3 text-xs font-mono text-indigo-400 font-bold">#{emp.id}</td>
-                          {/* Profile */}
                           <td className="px-3 py-3">
                             <div className="flex items-center gap-2.5">
                               <div className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-xs font-black flex-shrink-0" style={{ background:avatarColor(emp.employeeName||"") }}>{empInitials(emp.employeeName||"")}</div>
                               <span className="font-semibold text-slate-800 whitespace-nowrap text-xs">{emp.employeeName||"—"}</span>
                             </div>
                           </td>
-                          {/* Email */}
                           <td className="px-3 py-3 text-slate-500 text-xs whitespace-nowrap">{emp.email||"—"}</td>
-                          {/* [FIX-06] Password masked */}
-                          <td className="px-3 py-3 text-slate-400 text-xs font-mono tracking-widest">{emp.password?"••••••":<span className="text-slate-300 italic text-xs">not set</span>}</td>
-                          {/* Role */}
+                          <td className="px-3 py-3 text-slate-400 text-xs font-mono tracking-widest">{emp.password ? "••••••" : <span className="text-slate-300 italic text-xs">not set</span>}</td>
                           <td className="px-3 py-3"><RoleBadge role={emp.role||"Employee"} /></td>
-                          {/* [FIX-05] Real department name */}
-                          <td className="px-3 py-3"><span className="text-xs font-medium bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-md whitespace-nowrap">{deptName}</span></td>
-                          {/* Status */}
+                          <td className="px-3 py-3">
+                            <span className="text-xs font-medium bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-md whitespace-nowrap">{deptName}</span>
+                          </td>
                           <td className="px-3 py-3"><StatusBadge status={emp.status||"Active"} /></td>
-                          {/* [FIX-08] Joined date */}
                           <td className="px-3 py-3 text-xs text-slate-400 whitespace-nowrap">{fmtDate(emp.joinedDate||emp.createdAt)}</td>
-                          {/* Actions */}
                           <td className="px-3 py-3">
                             <div className="flex items-center gap-1.5">
-                              {/* [FIX-09] view with working X */}
                               <button onClick={()=>openView(emp)} title="View" className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-indigo-100 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">👁</button>
-                              {/* [FIX-10] edit all fields */}
                               <button onClick={()=>setEditEmp(emp)} title="Edit" className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-violet-100 bg-violet-50 text-violet-600 hover:bg-violet-100 transition-colors">✏️</button>
-                              {/* [FIX-04] delete */}
                               <button onClick={()=>setDeleteEmp(emp)} title="Delete" className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-red-100 bg-red-50 text-red-500 hover:bg-red-100 transition-colors">🗑️</button>
                             </div>
                           </td>
@@ -965,7 +958,6 @@ function EmployeeManagementContent() {
             </tbody>
           </table>
         </div>
-        {/* Pagination */}
         {!loading && filtered.length > PAGE_SIZE && (
           <div className="flex items-center justify-between px-5 py-3 border-t border-indigo-50">
             <span className="text-xs text-slate-400">Page {page} of {totalPages} · {filtered.length} total</span>
@@ -999,7 +991,7 @@ function EmployeeManagementContent() {
           <div className="bg-white rounded-3xl w-full max-w-sm p-6 shadow-2xl text-center">
             <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background:"linear-gradient(135deg,#fee2e2,#fecaca)" }}><span className="text-3xl">🗑️</span></div>
             <h3 className="text-lg font-bold text-slate-900 mb-2">Bulk Remove {selected.size} Employee{selected.size>1?"s":""}?</h3>
-            <p className="text-sm text-slate-500 mb-6">All selected employees will be permanently deleted.</p>
+            <p className="text-sm text-slate-500 mb-6">All selected employees will be permanently deleted. Employees with assigned assets will fail — soft-delete them via Edit instead.</p>
             <div className="flex gap-3">
               <button onClick={()=>setShowBulkConfirm(false)} disabled={bulkDelLoading} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-colors">Cancel</button>
               <button onClick={handleBulkDelete} disabled={bulkDelLoading} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white disabled:opacity-50 flex items-center justify-center gap-2" style={{ background:"linear-gradient(135deg,#ef4444,#dc2626)" }}>
@@ -1050,7 +1042,6 @@ function EmployeeManagementContent() {
                   </select>
                 </div>
               </div>
-              {/* [FIX-08] Joined date field */}
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Joined Date</label>
                 <input type="date" value={createForm.joinedDate} onChange={e=>setCreateForm(p=>({...p,joinedDate:e.target.value}))}
@@ -1073,13 +1064,10 @@ function EmployeeManagementContent() {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROOT EXPORT
-// [FIX-01] Fetches /api/assets + /api/maintenance for live bell notifications
 // ═══════════════════════════════════════════════════════════════════════════
 function AdminEmployeeInner() {
   const user = getStoredUser();
   const [open, setOpen] = useState(false);
-
-  // [FIX-01] Real notification data
   const [notifAssets, setNotifAssets] = useState([]);
   const [notifMaint,  setNotifMaint]  = useState([]);
 
@@ -1089,14 +1077,12 @@ function AdminEmployeeInner() {
       .catch(() => {});
   }, []);
 
-  // [FIX-01] assetMap for real asset names
   const assetMap = useMemo(() => {
     const m = {};
     notifAssets.forEach(a => { if (a.id!=null) m[a.id] = a.assetName??a.name??`Asset #${a.id}`; });
     return m;
   }, [notifAssets]);
 
-  // [FIX-01] Same buildNotifications as Dashboard.jsx
   const notifications = useMemo(() => buildNotifications(notifAssets, notifMaint, assetMap), [notifAssets, notifMaint, assetMap]);
 
   if (user.role !== "Admin") return <AccessDenied />;
