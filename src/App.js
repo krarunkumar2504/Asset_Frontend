@@ -168,7 +168,7 @@ function App() {
 
         <Route path="/admin/employees" element={<AdminEmployeeManagement />} />
 
-        <Route path="/admin/audit-logs" element={AdminAuditLogs}></Route>
+        <Route path="/audit-logs" element={<AdminAuditLogs />} />
 
         {/* Catch-all — unknown URLs go back to Login */}
         <Route path="*" element={<Navigate to="/" replace />} />
