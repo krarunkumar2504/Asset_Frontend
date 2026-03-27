@@ -7,7 +7,7 @@ import Maintenance     from "./pages/Maintenance";
 import Reports         from "./pages/Reports";
 import CreateEmployee  from "./pages/CreateEmployee";
 import AdminEmployeeManagement from "./pages/AdminEmployees";
-
+import AdminAuditLogs from "./pages/AdminAuditLogs";
 // ─────────────────────────────────────────────────────────────
 // HELPER — safely read user object from localStorage
 // ─────────────────────────────────────────────────────────────
@@ -167,6 +167,8 @@ function App() {
 
 
         <Route path="/admin/employees" element={<AdminEmployeeManagement />} />
+
+        <Route path="/admin/audit-logs" element={AdminAuditLogs}></Route>
 
         {/* Catch-all — unknown URLs go back to Login */}
         <Route path="*" element={<Navigate to="/" replace />} />

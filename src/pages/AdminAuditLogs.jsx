@@ -1,0 +1,737 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// AdminAuditLogs.jsx  —  Admin Audit Logs Page
+// ═══════════════════════════════════════════════════════════════════════════
+// Fetches GET /api/audit-logs and renders a fully interactive log viewer.
+// Theme matches the existing indigo + teal gradient system.
+// ═══════════════════════════════════════════════════════════════════════════
+
+import {
+  useState, useEffect, useMemo, useRef, useCallback,
+  createContext, useContext,
+} from "react";
+import { useNavigate, useLocation } from "react-router-dom";
+import { createPortal } from "react-dom";
+import axios from "axios";
+
+// ─── Axios ───────────────────────────────────────────────────────────────────
+const api = axios.create({
+  baseURL: "https://assest-management-system.onrender.com/",
+  headers: { "Content-Type": "application/json", Accept: "application/json" },
+  timeout: 12000,
+});
+
+// ─── Nav ─────────────────────────────────────────────────────────────────────
+const NAV_ITEMS = [
+  { label: "Dashboard",   icon: "▪",   path: "/dashboard"   },
+  { label: "Assets",      icon: "📦",  path: "/assets"      },
+  { label: "Maintenance", icon: "🔧",  path: "/maintenance" },
+  { label: "Reports",     icon: "📊",  path: "/reports"     },
+];
+const ADMIN_NAV_ITEMS = [
+  { label: "Create Employee",  icon: "👤", path: "/create-employee"  },
+  { label: "Manage Employees", icon: "🏢", path: "/admin/employees"  },
+  { label: "Audit Logs",       icon: "📜", path: "/audit-logs"       },
+];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function getStoredUser() {
+  try { return JSON.parse(localStorage.getItem("user")) ?? {}; } catch { return {}; }
+}
+function getDisplayName(u) {
+  if (u.employeeName?.trim()) return u.employeeName.trim();
+  if (u.name?.trim())         return u.name.trim();
+  if (u.email?.trim())        return u.email.split("@")[0];
+  return "User";
+}
+function getUserInitials(u) {
+  return getDisplayName(u).split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2) || "U";
+}
+function getDashboardLabel(u) {
+  const r = (u.role ?? "").trim();
+  return r ? `${r} Dashboard` : "Dashboard";
+}
+
+/** Format timestamp as relative ("2 mins ago", "Yesterday") */
+function timeAgo(ts) {
+  if (!ts) return "—";
+  const dt = new Date(ts);
+  if (isNaN(dt)) return "—";
+  const diff = (Date.now() - dt.getTime()) / 1000;
+  if (diff < 60)   return "Just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)} min${Math.floor(diff / 60) > 1 ? "s" : ""} ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} hr${Math.floor(diff / 3600) > 1 ? "s" : ""} ago`;
+  if (diff < 172800) return "Yesterday";
+  return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+function fmtFull(ts) {
+  if (!ts) return "—";
+  const dt = new Date(ts);
+  if (isNaN(dt)) return "—";
+  return dt.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+/** Determine action category */
+function actionCategory(action = "") {
+  const a = action.toUpperCase();
+  if (a.startsWith("CREATE")) return "CREATE";
+  if (a.startsWith("UPDATE")) return "UPDATE";
+  if (a.startsWith("DELETE")) return "DELETE";
+  return "OTHER";
+}
+
+/** Badge config per category */
+const ACTION_CFG = {
+  CREATE: { label:"CREATE", bg:"rgba(16,185,129,.12)", border:"rgba(16,185,129,.35)", color:"#059669", dot:"#10b981", icon:"✨", glow:"0 0 12px rgba(16,185,129,.25)" },
+  UPDATE: { label:"UPDATE", bg:"rgba(59,130,246,.12)", border:"rgba(59,130,246,.35)", color:"#2563eb", dot:"#3b82f6", icon:"✏️", glow:"0 0 12px rgba(59,130,246,.25)" },
+  DELETE: { label:"DELETE", bg:"rgba(239,68,68,.12)",  border:"rgba(239,68,68,.35)",  color:"#dc2626", dot:"#ef4444", icon:"🗑️", glow:"0 0 12px rgba(239,68,68,.25)"  },
+  OTHER:  { label:"OTHER",  bg:"rgba(107,114,128,.1)", border:"rgba(107,114,128,.3)", color:"#4b5563", dot:"#6b7280", icon:"📌", glow:"none" },
+};
+
+/** Return today's start */
+function startOfToday() {
+  const d = new Date(); d.setHours(0, 0, 0, 0); return d;
+}
+
+// ─── Notification helpers (shared) ───────────────────────────────────────────
+function deriveStatus(dt) {
+  if (!dt) return "Completed";
+  const d = (new Date(dt) - new Date()) / 86400000;
+  return d < 0 ? "Overdue" : d <= 60 ? "Pending" : "Completed";
+}
+function buildNotifications(assets, maint) {
+  const n = [];
+  maint.filter(r => deriveStatus(r.nextDueDate) === "Overdue").slice(0, 3).forEach(r =>
+    n.push({ id: `ov-${r.id}`, type: "critical", icon: "🚨", title: "Overdue Maintenance", message: `Asset maintenance overdue`, time: "Overdue" }));
+  n.push({ id: "sys", type: "info", icon: "✅", title: "System Status", message: "All systems operational", time: "Now" });
+  return n;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TOAST SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+const ToastCtx = createContext(null);
+function useToast() { return useContext(ToastCtx); }
+const T_CFG = {
+  success: { icon:"✅", bar:"linear-gradient(90deg,#10b981,#34d399)", border:"rgba(16,185,129,0.35)", bg:"rgba(240,253,244,0.98)", glow:"0 0 0 1px rgba(16,185,129,0.2),0 20px 60px rgba(16,185,129,0.18),0 4px 16px rgba(0,0,0,0.12)", titleC:"#064e3b", msgC:"#065f46", iconBg:"linear-gradient(135deg,#10b981,#059669)", tagBg:"rgba(16,185,129,0.12)", tagC:"#047857", tag:"SUCCESS", dur:4000 },
+  error:   { icon:"❌", bar:"linear-gradient(90deg,#ef4444,#f87171)", border:"rgba(239,68,68,0.35)", bg:"rgba(255,241,241,0.98)", glow:"0 0 0 1px rgba(239,68,68,0.2),0 20px 60px rgba(239,68,68,0.18),0 4px 16px rgba(0,0,0,0.12)", titleC:"#7f1d1d", msgC:"#991b1b", iconBg:"linear-gradient(135deg,#ef4444,#dc2626)", tagBg:"rgba(239,68,68,0.12)", tagC:"#b91c1c", tag:"ERROR", dur:6000 },
+  warning: { icon:"⚠️", bar:"linear-gradient(90deg,#f59e0b,#fcd34d)", border:"rgba(245,158,11,0.35)", bg:"rgba(255,251,235,0.98)", glow:"0 0 0 1px rgba(245,158,11,0.2),0 20px 60px rgba(245,158,11,0.15),0 4px 16px rgba(0,0,0,0.12)", titleC:"#78350f", msgC:"#92400e", iconBg:"linear-gradient(135deg,#f59e0b,#d97706)", tagBg:"rgba(245,158,11,0.12)", tagC:"#b45309", tag:"WARNING", dur:5000 },
+  info:    { icon:"ℹ️", bar:"linear-gradient(90deg,#4f46e5,#818cf8)", border:"rgba(79,70,229,0.35)", bg:"rgba(245,243,255,0.98)", glow:"0 0 0 1px rgba(79,70,229,0.2),0 20px 60px rgba(79,70,229,0.15),0 4px 16px rgba(0,0,0,0.12)", titleC:"#1e1b4b", msgC:"#3730a3", iconBg:"linear-gradient(135deg,#4f46e5,#7c3aed)", tagBg:"rgba(79,70,229,0.12)", tagC:"#4338ca", tag:"INFO", dur:4000 },
+};
+function ToastCard({ t, remove }) {
+  const c = T_CFG[t.type] ?? T_CFG.info;
+  const [vis, setVis] = useState(false), [w, setW] = useState(100);
+  const iv = useRef(null);
+  useEffect(() => { const id = setTimeout(() => setVis(true), 20); return () => clearTimeout(id); }, []);
+  useEffect(() => {
+    const step = 100 / (c.dur / 50);
+    iv.current = setInterval(() => setW(p => { if (p <= 0) { clearInterval(iv.current); return 0; } return p - step; }), 50);
+    return () => clearInterval(iv.current);
+  }, [c.dur]);
+  useEffect(() => { if (w <= 0) close(); }, [w]);
+  const close = () => { setVis(false); setTimeout(() => remove(t.id), 380); };
+  const isMob = window.innerWidth < 640;
+  return (
+    <div style={{ transform: vis ? "translateY(0) scale(1)" : isMob ? "translateY(80px) scale(0.92)" : "translateX(110%) scale(0.92)", opacity: vis ? 1 : 0, transition: "transform 0.4s cubic-bezier(0.34,1.56,0.64,1),opacity 0.4s ease", background: c.bg, border: `1.5px solid ${c.border}`, borderRadius: 18, overflow: "hidden", boxShadow: c.glow, width: "100%", pointerEvents: "auto", position: "relative" }}>
+      <div style={{ height: 3, background: c.bar, position: "absolute", top: 0, left: 0, right: 0 }} />
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "16px 14px 14px" }}>
+        <div style={{ width: 42, height: 42, borderRadius: 14, background: c.iconBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>{c.icon}</div>
+        <div style={{ flex: 1, minWidth: 0, paddingTop: 1 }}>
+          <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", background: c.tagBg, color: c.tagC, borderRadius: 5, padding: "2px 6px", textTransform: "uppercase", display: "inline-block", marginBottom: 4 }}>{c.tag}</span>
+          <p style={{ fontSize: 13, fontWeight: 700, color: c.titleC, marginBottom: 3, lineHeight: 1.3 }}>{t.title}</p>
+          {t.message && <p style={{ fontSize: 12, color: c.msgC, lineHeight: 1.55, margin: 0, opacity: 0.85 }}>{t.message}</p>}
+        </div>
+        <button onClick={close} style={{ width: 26, height: 26, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.06)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: "#64748b", flexShrink: 0, marginTop: 2 }}>✕</button>
+      </div>
+      <div style={{ height: 4, background: "rgba(0,0,0,0.07)" }}>
+        <div style={{ height: "100%", width: `${w}%`, background: c.bar, transition: "width 0.05s linear" }} />
+      </div>
+    </div>
+  );
+}
+function ToastContainer({ toasts, remove }) {
+  const isMob = window.innerWidth < 640;
+  return createPortal(
+    <div style={{ position: "fixed", zIndex: 99999, pointerEvents: "none", display: "flex", flexDirection: "column", gap: 10, ...(isMob ? { bottom: 16, left: 12, right: 12 } : { top: 72, right: 20, width: 380, alignItems: "flex-end" }) }}>
+      {toasts.map(t => <ToastCard key={t.id} t={t} remove={remove} />)}
+    </div>, document.body
+  );
+}
+function ToastProvider({ children }) {
+  const [toasts, setToasts] = useState([]);
+  const add = useCallback((type, title, message) => {
+    const id = Date.now() + Math.random();
+    setToasts(p => { const n = [...p, { id, type, title, message }]; return n.length > 4 ? n.slice(-4) : n; });
+  }, []);
+  const remove = useCallback(id => setToasts(p => p.filter(t => t.id !== id)), []);
+  const toast = useMemo(() => ({ success:(t,m)=>add("success",t,m), error:(t,m)=>add("error",t,m), warning:(t,m)=>add("warning",t,m), info:(t,m)=>add("info",t,m) }), [add]);
+  return (
+    <ToastCtx.Provider value={{ toast }}>
+      {children}
+      <ToastContainer toasts={toasts} remove={remove} />
+    </ToastCtx.Provider>
+  );
+}
+
+// ─── NOTIFICATION DROPDOWN ────────────────────────────────────────────────────
+function NotificationDropdown({ notifications, anchorRect, onClose }) {
+  const TS = { critical:{ iconBg:"bg-red-100", dot:"bg-red-500", title:"text-red-700" }, warning:{ iconBg:"bg-amber-100", dot:"bg-amber-500", title:"text-amber-700" }, info:{ iconBg:"bg-indigo-100", dot:"bg-indigo-400", title:"text-indigo-700" } };
+  const isMobile = window.innerWidth < 480;
+  const topOffset = (anchorRect?.bottom ?? 60) + 8;
+  const style = isMobile
+    ? { position:"fixed", top:topOffset, left:12, right:12, zIndex:9999, background:"#fff", borderRadius:16, overflow:"hidden", boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)", border:"1px solid rgba(79,70,229,.1)" }
+    : { position:"fixed", top:topOffset, right: Math.max(8, window.innerWidth - (anchorRect?.right ?? 60)), width:320, zIndex:9999, background:"#fff", borderRadius:16, overflow:"hidden", boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)", border:"1px solid rgba(79,70,229,.1)" };
+  return createPortal(
+    <>
+      <div style={{ position:"fixed", inset:0, zIndex:9998 }} onClick={onClose} />
+      <div style={style}>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-indigo-50" style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold text-indigo-950">Notifications</span>
+            <span className="text-xs font-bold text-white px-1.5 py-0.5 rounded-full" style={{ background:"linear-gradient(90deg,#f43f5e,#ec4899)" }}>{notifications.length}</span>
+          </div>
+          <button onClick={onClose} className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-100 text-sm">✕</button>
+        </div>
+        <div style={{ maxHeight:320, overflowY:"auto" }}>
+          {notifications.map(n => {
+            const s = TS[n.type] ?? TS.info;
+            return (
+              <div key={n.id} className="flex gap-3 px-4 py-3 border-b border-slate-50 hover:bg-slate-50 transition-colors cursor-default">
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0 ${s.iconBg}`}>{n.icon}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-1 mb-0.5">
+                    <span className={`text-xs font-bold truncate ${s.title}`}>{n.title}</span>
+                    <span className="text-xs text-slate-300 flex-shrink-0 ml-2">{n.time}</span>
+                  </div>
+                  <p className="text-xs text-slate-500 leading-relaxed">{n.message}</p>
+                </div>
+                <span className={`w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ${s.dot}`} />
+              </div>
+            );
+          })}
+        </div>
+        <div className="px-4 py-2.5 border-t border-indigo-50 text-center">
+          <span className="text-xs text-indigo-500 font-medium">{notifications.filter(n=>n.type==="critical").length} critical · {notifications.length} total</span>
+        </div>
+      </div>
+    </>, document.body
+  );
+}
+
+// ─── SIDEBAR ─────────────────────────────────────────────────────────────────
+function SidebarContent({ onNavigate }) {
+  const navigate = useNavigate(), location = useLocation(), user = getStoredUser();
+  const isAdmin = user.role === "Admin";
+  const go = p => { navigate(p); onNavigate?.(); };
+  const NavBtn = ({ item }) => {
+    const on = location.pathname === item.path || (item.path !== "/dashboard" && location.pathname.startsWith(item.path));
+    return (
+      <button onClick={() => go(item.path)}
+        className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative ${on ? "text-white" : "text-indigo-300 hover:text-indigo-100 hover:bg-white/5"}`}
+        style={on ? { background:"linear-gradient(90deg,rgba(99,102,241,.5),rgba(20,184,166,.3))", boxShadow:"0 0 20px rgba(99,102,241,.3)" } : {}}>
+        {on && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full" style={{ background:"linear-gradient(180deg,#818cf8,#34d399)" }} />}
+        <span className="text-sm w-4 text-center">{item.icon}</span>
+        <span className="flex-1">{item.label}</span>
+      </button>
+    );
+  };
+  return (
+    <div className="flex flex-col h-full py-6 px-3.5">
+      <div className="flex items-center gap-2.5 px-2 mb-8 cursor-pointer" onClick={() => go("/dashboard")}>
+        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background:"linear-gradient(135deg,#818cf8,#34d399)" }}>⚙</div>
+        <div>
+          <div className="text-white font-bold text-base tracking-tight">AssetAI</div>
+          <div className="text-indigo-300 font-medium tracking-widest uppercase" style={{ fontSize:9 }}>Management Suite</div>
+        </div>
+      </div>
+      <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mb-2">Main</p>
+      <nav className="flex flex-col gap-1">{NAV_ITEMS.map(i => <NavBtn key={i.label} item={i} />)}</nav>
+      {isAdmin && (
+        <>
+          <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mt-5 mb-2">Admin</p>
+          <nav className="flex flex-col gap-1">{ADMIN_NAV_ITEMS.map(i => <NavBtn key={i.label} item={i} />)}</nav>
+        </>
+      )}
+      <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
+        <p className="text-xs font-semibold tracking-wide uppercase" style={{ color: isAdmin ? "#34d399" : "#a5b4fc" }}>{user.role ?? "Employee"}</p>
+        <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{getDisplayName(user)}</p>
+        <p className="text-xs text-indigo-600 mt-0.5">v3.2.0 — Pro Plan</p>
+      </div>
+    </div>
+  );
+}
+function Sidebar({ mobileOpen, onClose }) {
+  const bg = "linear-gradient(180deg,#1e1b4b 0%,#312e81 60%,#134e4a 100%)";
+  return (
+    <>
+      <aside className="w-52 flex-shrink-0 hidden lg:flex flex-col" style={{ background:bg }}><SidebarContent /></aside>
+      <div className={`fixed inset-0 z-40 bg-black/50 transition-opacity duration-300 lg:hidden ${mobileOpen?"opacity-100 pointer-events-auto":"opacity-0 pointer-events-none"}`} onClick={onClose} />
+      <aside className={`fixed top-0 left-0 z-50 h-full w-64 flex flex-col transition-transform duration-300 ease-in-out lg:hidden ${mobileOpen?"translate-x-0":"-translate-x-full"}`} style={{ background:bg }}>
+        <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 rounded-lg flex items-center justify-center text-indigo-300 hover:bg-white/10 hover:text-white transition-colors text-lg z-10">✕</button>
+        <SidebarContent onNavigate={onClose} />
+      </aside>
+    </>
+  );
+}
+
+// ─── NAVBAR ───────────────────────────────────────────────────────────────────
+function Navbar({ onMenuToggle, notifications }) {
+  const navigate = useNavigate(), user = getStoredUser(), { toast } = useToast();
+  const bellRef = useRef(null);
+  const [notifOpen, setNotifOpen] = useState(false), [anchorRect, setAnchorRect] = useState(null);
+  const dName = getDisplayName(user), ini = getUserInitials(user);
+  const urgent = notifications.filter(n => n.type === "critical" || n.type === "warning").length;
+  const handleBell = () => { if (bellRef.current) setAnchorRect(bellRef.current.getBoundingClientRect()); setNotifOpen(o => !o); };
+  const logout = () => { localStorage.removeItem("user"); toast.info("Signed Out","Logged out successfully."); setTimeout(() => navigate("/"), 600); };
+  return (
+    <header className="h-14 flex items-center px-4 sm:px-6 gap-3 flex-shrink-0 border-b" style={{ background:"rgba(255,255,255,.85)", backdropFilter:"blur(12px)", borderColor:"rgba(79,70,229,.08)" }}>
+      <button onClick={onMenuToggle} className="lg:hidden w-8 h-8 rounded-lg flex items-center justify-center border border-indigo-100 bg-indigo-50/60 text-indigo-600 hover:bg-indigo-100 transition-colors flex-shrink-0">
+        <span className="flex flex-col gap-1 w-4"><span className="block h-0.5 bg-current rounded-full" /><span className="block h-0.5 bg-current rounded-full" /><span className="block h-0.5 bg-current rounded-full" /></span>
+      </button>
+      <div className="flex-1 min-w-0">
+        <span className="text-sm font-bold text-indigo-950 hidden sm:inline">{getDashboardLabel(user)}</span>
+        <span className="text-xs text-indigo-300 font-normal hidden sm:inline"> / Audit Logs</span>
+        <span className="text-sm font-bold text-indigo-950 sm:hidden">Audit Logs</span>
+      </div>
+      <div className="hidden md:flex items-center gap-1.5 border border-indigo-100 rounded-full px-3 py-1 text-xs font-medium text-indigo-600 bg-indigo-50/80">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Admin Portal
+      </div>
+      <button ref={bellRef} onClick={handleBell} className={`relative w-8 h-8 rounded-lg flex items-center justify-center text-sm border transition-colors flex-shrink-0 ${notifOpen?"bg-indigo-100 border-indigo-200":"border-indigo-100 bg-indigo-50/60 hover:bg-indigo-100"}`}>
+        🔔
+        {notifications.length > 0 && (
+          <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full text-white flex items-center justify-center font-bold" style={{ background:urgent>0?"linear-gradient(135deg,#f43f5e,#ec4899)":"linear-gradient(135deg,#4f46e5,#9333ea)", fontSize:9 }}>
+            {notifications.length > 9 ? "9+" : notifications.length}
+          </span>
+        )}
+      </button>
+      {notifOpen && <NotificationDropdown notifications={notifications} anchorRect={anchorRect} onClose={() => setNotifOpen(false)} />}
+      <div className="flex items-center gap-2 border border-indigo-100 rounded-full px-2 py-1 bg-white cursor-pointer flex-shrink-0">
+        <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold" style={{ background:"linear-gradient(135deg,#4f46e5,#14b8a6)" }}>{ini}</div>
+        <span className="text-xs font-medium text-slate-700 hidden sm:block max-w-20 truncate">{dName.split(" ")[0]}</span>
+      </div>
+      <button onClick={logout} className="text-xs text-indigo-500 border border-indigo-200 bg-indigo-50 px-2 sm:px-3 py-1.5 rounded-lg hover:bg-indigo-100 font-medium transition-colors flex-shrink-0">
+        <span className="hidden sm:inline">→ Logout</span><span className="sm:hidden">→</span>
+      </button>
+    </header>
+  );
+}
+
+// ─── STAT CARD ────────────────────────────────────────────────────────────────
+function StatCard({ icon, label, value, sub, gradient, glowColor, trend, trendUp }) {
+  return (
+    <div className="relative overflow-hidden rounded-2xl p-5 cursor-default transition-all duration-300 hover:-translate-y-1 hover:shadow-2xl"
+      style={{ background:gradient, boxShadow:`0 4px 24px ${glowColor}` }}>
+      <div className="absolute inset-0 opacity-10" style={{ background:"radial-gradient(circle at top right,white,transparent 60%)" }} />
+      <div className="absolute -bottom-4 -right-4 w-20 h-20 rounded-full opacity-10" style={{ background:"white" }} />
+      <div className="relative z-10">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-2xl">{icon}</span>
+          <span className={`text-xs font-bold px-2 py-0.5 rounded-full bg-white/20 text-white border border-white/30`}>{trend}</span>
+        </div>
+        <p className="text-3xl font-black text-white tracking-tight leading-none">{value}</p>
+        <p className="text-xs font-semibold text-white/70 uppercase tracking-widest mt-1">{label}</p>
+        <p className="text-xs text-white/50 mt-1">{sub}</p>
+      </div>
+    </div>
+  );
+}
+
+// ─── ACTION BADGE ─────────────────────────────────────────────────────────────
+function ActionBadge({ action }) {
+  const cat = actionCategory(action);
+  const c = ACTION_CFG[cat] ?? ACTION_CFG.OTHER;
+  return (
+    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border"
+      style={{ background:c.bg, borderColor:c.border, color:c.color, boxShadow:c.glow }}>
+      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background:c.dot }} />
+      {action || "—"}
+    </span>
+  );
+}
+
+// ─── LOG DETAIL MODAL ─────────────────────────────────────────────────────────
+function LogDetailModal({ log, onClose }) {
+  const cat = actionCategory(log?.action);
+  const c = ACTION_CFG[cat] ?? ACTION_CFG.OTHER;
+  return createPortal(
+    <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
+      style={{ background:"rgba(15,10,40,0.8)", backdropFilter:"blur(8px)" }}
+      onClick={onClose}>
+      <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl" onClick={e => e.stopPropagation()}
+        style={{ boxShadow:"0 40px 80px rgba(79,70,229,.3), 0 0 0 1px rgba(79,70,229,.1)" }}>
+        {/* Header */}
+        <div className="relative px-6 py-5" style={{ background:"linear-gradient(135deg,#1e1b4b,#312e81,#134e4a)" }}>
+          <div className="absolute inset-0 opacity-20" style={{ background:"radial-gradient(circle at top right,white,transparent 60%)" }} />
+          <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 rounded-xl bg-white/15 hover:bg-white/30 flex items-center justify-center text-white transition-colors z-10 text-sm font-bold">✕</button>
+          <div className="relative flex items-center gap-4">
+            <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-2xl flex-shrink-0 border-2 border-white/20"
+              style={{ background:`linear-gradient(135deg,${c.dot},${c.color})`, boxShadow:`0 8px 20px ${c.glow}` }}>
+              {c.icon}
+            </div>
+            <div>
+              <h3 className="text-base font-black text-white">{log?.action || "—"}</h3>
+              <p className="text-xs text-white/60 mt-0.5">{timeAgo(log?.timestamp)}</p>
+            </div>
+          </div>
+        </div>
+        {/* Body */}
+        <div className="p-6 flex flex-col gap-4">
+          <div className="grid grid-cols-1 gap-3">
+            {[
+              { label:"Log ID",        value:`#${log?.id || "—"}` },
+              { label:"Action",        value:<ActionBadge action={log?.action} /> },
+              { label:"Performed By",  value:log?.performedBy || "—" },
+              { label:"Timestamp",     value:fmtFull(log?.timestamp) },
+            ].map(f => (
+              <div key={f.label} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-1">{f.label}</p>
+                <div className="text-sm font-bold text-slate-800">{f.value}</div>
+              </div>
+            ))}
+          </div>
+          {/* Description */}
+          <div className="rounded-xl p-4 border" style={{ background:`${c.bg}`, borderColor:c.border }}>
+            <p className="text-xs font-semibold uppercase tracking-widest mb-1.5" style={{ color:c.color }}>Description</p>
+            <p className="text-sm font-medium text-slate-700 leading-relaxed">{log?.description || "No description available."}</p>
+          </div>
+        </div>
+        <div className="px-6 pb-6">
+          <button onClick={onClose} className="w-full py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors">Close</button>
+        </div>
+      </div>
+    </div>, document.body
+  );
+}
+
+// ─── SKELETON ROW ─────────────────────────────────────────────────────────────
+function SkeletonRow() {
+  return (
+    <tr className="animate-pulse border-b border-slate-50">
+      {[80, 200, 120, 100].map((w, i) => (
+        <td key={i} className="px-4 py-3.5">
+          <div className="h-4 bg-slate-100 rounded-full" style={{ width: w }} />
+        </td>
+      ))}
+      <td className="px-4 py-3.5"><div className="h-4 w-12 bg-slate-100 rounded-full" /></td>
+    </tr>
+  );
+}
+
+// ─── ACCESS DENIED ─────────────────────────────────────────────────────────────
+function AccessDenied() {
+  const navigate = useNavigate();
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen gap-6 p-8" style={{ background:"linear-gradient(135deg,#f0f0ff,#f5f9ff,#f0fff8)" }}>
+      <div className="w-24 h-24 rounded-3xl flex items-center justify-center text-5xl" style={{ background:"linear-gradient(135deg,#fee2e2,#fecaca)" }}>🔒</div>
+      <div className="text-center">
+        <h2 className="text-2xl font-black text-slate-900 mb-2">Access Denied</h2>
+        <p className="text-slate-500 text-sm max-w-xs">Admin access is required to view audit logs.</p>
+      </div>
+      <button onClick={() => navigate("/dashboard")} className="px-6 py-3 rounded-xl text-sm font-bold text-white" style={{ background:"linear-gradient(90deg,#4f46e5,#7c3aed)", boxShadow:"0 4px 14px rgba(79,70,229,.4)" }}>
+        ← Return to Dashboard
+      </button>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN AUDIT LOGS CONTENT
+// ═══════════════════════════════════════════════════════════════════════════
+const PAGE_SIZE = 10;
+
+function AuditLogsContent() {
+  const { toast } = useToast();
+  const [logs,    setLogs]    = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search,  setSearch]  = useState("");
+  const [filter,  setFilter]  = useState("All");  // All | CREATE | UPDATE | DELETE
+  const [page,    setPage]    = useState(1);
+  const [viewLog, setViewLog] = useState(null);
+  const [lastRefresh, setLastRefresh] = useState(null);
+
+  const fetchLogs = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const res = await api.get("/api/audit-logs");
+      const data = Array.isArray(res.data) ? res.data : [];
+      setLogs(data);
+      setLastRefresh(new Date());
+      if (!silent) toast.success("Logs Loaded", `${data.length} audit record${data.length !== 1 ? "s" : ""} fetched.`);
+    } catch (err) {
+      toast.error("Load Failed", err.response?.data?.message || err.message || "Could not fetch audit logs.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchLogs(); }, [fetchLogs]);
+
+  // Stats
+  const stats = useMemo(() => {
+    const today = startOfToday();
+    return {
+      total:    logs.length,
+      today:    logs.filter(l => new Date(l.timestamp) >= today).length,
+      deletes:  logs.filter(l => actionCategory(l.action) === "DELETE").length,
+      creates:  logs.filter(l => actionCategory(l.action) === "CREATE").length,
+    };
+  }, [logs]);
+
+  // Filtered + searched
+  const filtered = useMemo(() => logs.filter(l => {
+    const q   = search.toLowerCase();
+    const matchQ = !q ||
+      (l.description || "").toLowerCase().includes(q) ||
+      (l.performedBy || "").toLowerCase().includes(q) ||
+      (l.action || "").toLowerCase().includes(q);
+    const matchF = filter === "All" || actionCategory(l.action) === filter;
+    return matchQ && matchF;
+  }), [logs, search, filter]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  useEffect(() => { setPage(1); }, [search, filter]);
+
+  // Export CSV
+  const exportCSV = () => {
+    const headers = ["ID", "Action", "Description", "Performed By", "Timestamp"];
+    const rows = filtered.map(l => [l.id, l.action, l.description, l.performedBy, fmtFull(l.timestamp)]);
+    const csv = [headers, ...rows].map(r => r.map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = "audit_logs.csv"; a.click(); URL.revokeObjectURL(a.href);
+    toast.success("Exported", `${filtered.length} log records exported.`);
+  };
+
+  return (
+    <div className="flex flex-col gap-5 pb-6">
+
+      {/* ── Page Header ── */}
+      <div className="relative overflow-hidden rounded-3xl p-6 sm:p-8"
+        style={{ background:"linear-gradient(135deg,#1e1b4b 0%,#312e81 55%,#134e4a 100%)", boxShadow:"0 8px 40px rgba(79,70,229,.3)" }}>
+        <div className="absolute inset-0 opacity-10" style={{ background:"radial-gradient(ellipse at top right,white,transparent 60%)" }} />
+        <div className="absolute -bottom-8 -right-8 w-36 h-36 rounded-full opacity-10" style={{ background:"white" }} />
+        <div className="relative z-10 flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-10 h-10 rounded-2xl flex items-center justify-center text-xl flex-shrink-0"
+                style={{ background:"linear-gradient(135deg,#818cf8,#34d399)", boxShadow:"0 0 20px rgba(129,140,248,.5)" }}>
+                📜
+              </div>
+              <div>
+                <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">Audit Logs</h1>
+                <p className="text-xs text-indigo-300 font-medium">Track all admin activities in real-time</p>
+              </div>
+            </div>
+            {lastRefresh && (
+              <p className="text-xs text-indigo-400">Last synced: {timeAgo(lastRefresh)}</p>
+            )}
+          </div>
+          <button onClick={() => fetchLogs(false)} disabled={loading}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white border border-white/20 bg-white/10 hover:bg-white/20 transition-all disabled:opacity-60">
+            <span className={loading ? "animate-spin" : ""}>↺</span> Refresh
+          </button>
+        </div>
+      </div>
+
+      {/* ── Stats Cards ── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <StatCard icon="📋" label="Total Logs"       value={stats.total}   sub="All recorded events"   gradient="linear-gradient(135deg,#4f46e5,#7c3aed)" glowColor="rgba(79,70,229,.25)"  trend="All" />
+        <StatCard icon="⚡" label="Today's Actions"  value={stats.today}   sub="Since midnight"        gradient="linear-gradient(135deg,#0369a1,#0891b2)" glowColor="rgba(3,105,161,.25)"  trend="Today" />
+        <StatCard icon="🗑️" label="Delete Actions"   value={stats.deletes} sub="Destructive operations" gradient="linear-gradient(135deg,#dc2626,#f97316)" glowColor="rgba(220,38,38,.2)"   trend={stats.deletes > 0 ? "⚠ Critical" : "✓ Clean"} />
+        <StatCard icon="✨" label="Create Actions"   value={stats.creates} sub="New records created"    gradient="linear-gradient(135deg,#059669,#0d9488)" glowColor="rgba(5,150,105,.25)"  trend="Growth" />
+      </div>
+
+      {/* ── Filters & Search ── */}
+      <div className="bg-white rounded-2xl border border-indigo-50 p-4" style={{ boxShadow:"0 2px 12px rgba(79,70,229,.06)" }}>
+        <div className="flex flex-col sm:flex-row gap-3 flex-wrap">
+          {/* Search */}
+          <div className="relative flex-1 min-w-52">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">🔎</span>
+            <input type="text" value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Search by action, description, or admin…"
+              className="w-full pl-9 pr-4 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
+          </div>
+          {/* Filter tabs */}
+          <div className="flex items-center gap-1 bg-slate-50 rounded-xl p-1 border border-slate-200">
+            {["All", "CREATE", "UPDATE", "DELETE"].map(f => {
+              const active = filter === f;
+              const cfg = ACTION_CFG[f] ?? { color:"#4b5563", dot:"#6b7280" };
+              return (
+                <button key={f} onClick={() => setFilter(f)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                  style={active
+                    ? { background: f === "All" ? "linear-gradient(90deg,#4f46e5,#7c3aed)" : `linear-gradient(90deg,${cfg.dot},${cfg.color})`, color:"white", boxShadow:"0 2px 8px rgba(79,70,229,.3)" }
+                    : { color:"#64748b" }
+                  }>
+                  {f === "All" ? "All" : f}
+                </button>
+              );
+            })}
+          </div>
+          {/* Export */}
+          <button onClick={exportCSV} className="px-4 py-2.5 rounded-xl text-sm font-semibold text-emerald-700 border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 transition-colors flex items-center gap-2 whitespace-nowrap">
+            📥 Export CSV
+          </button>
+        </div>
+        {/* Result count */}
+        <p className="text-xs text-slate-400 mt-3">
+          Showing <span className="font-semibold text-indigo-600">{filtered.length}</span> of <span className="font-semibold">{logs.length}</span> records
+        </p>
+      </div>
+
+      {/* ── Table ── */}
+      <div className="bg-white rounded-2xl border border-indigo-50 overflow-hidden" style={{ boxShadow:"0 2px 12px rgba(79,70,229,.06)" }}>
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-indigo-50/80"
+          style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold text-indigo-950">Activity Timeline</span>
+            <span className="text-xs font-bold text-white px-2 py-0.5 rounded-full" style={{ background:"linear-gradient(90deg,#4f46e5,#7c3aed)" }}>{filtered.length}</span>
+          </div>
+          <span className="text-xs text-slate-400">Newest first</span>
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <table className="w-full text-sm" style={{ minWidth: 700 }}>
+            <thead>
+              <tr style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
+                {["Action", "Description", "Performed By", "Time", "Details"].map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {loading
+                ? Array.from({ length: 6 }).map((_, i) => <SkeletonRow key={i} />)
+                : paged.length === 0
+                  ? (
+                    <tr>
+                      <td colSpan={5} className="px-5 py-20 text-center">
+                        <div className="flex flex-col items-center gap-3">
+                          <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl"
+                            style={{ background:"linear-gradient(135deg,#f0f0ff,#e0e7ff)" }}>📜</div>
+                          <p className="text-sm font-semibold text-slate-400">No logs found</p>
+                          <p className="text-xs text-slate-300">Try adjusting your search or filter</p>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                  : paged.map((log, idx) => {
+                    const cat = actionCategory(log.action);
+                    const cfg = ACTION_CFG[cat] ?? ACTION_CFG.OTHER;
+                    return (
+                      <tr key={log.id}
+                        className="hover:bg-indigo-50/40 transition-colors border-b border-slate-50 cursor-pointer"
+                        style={idx % 2 === 1 ? { background:"rgba(248,250,252,0.6)" } : {}}
+                        onClick={() => setViewLog(log)}>
+                        {/* Action badge */}
+                        <td className="px-4 py-3.5 whitespace-nowrap">
+                          <ActionBadge action={log.action} />
+                        </td>
+                        {/* Description */}
+                        <td className="px-4 py-3.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-base flex-shrink-0">{cfg.icon}</span>
+                            <span className="text-xs text-slate-700 font-medium line-clamp-2 leading-relaxed">
+                              {log.description || "—"}
+                            </span>
+                          </div>
+                        </td>
+                        {/* Performed by */}
+                        <td className="px-4 py-3.5 whitespace-nowrap">
+                          <div className="flex items-center gap-2">
+                            <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-black flex-shrink-0"
+                              style={{ background:"linear-gradient(135deg,#4f46e5,#7c3aed)" }}>
+                              {(log.performedBy || "?")[0].toUpperCase()}
+                            </div>
+                            <span className="text-xs font-semibold text-slate-700">{log.performedBy || "—"}</span>
+                          </div>
+                        </td>
+                        {/* Time */}
+                        <td className="px-4 py-3.5 whitespace-nowrap">
+                          <div>
+                            <p className="text-xs font-semibold text-slate-600">{timeAgo(log.timestamp)}</p>
+                            <p className="text-xs text-slate-300 mt-0.5">{fmtFull(log.timestamp)}</p>
+                          </div>
+                        </td>
+                        {/* View button */}
+                        <td className="px-4 py-3.5">
+                          <button
+                            onClick={e => { e.stopPropagation(); setViewLog(log); }}
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-indigo-100 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">
+                            View →
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
+              }
+            </tbody>
+          </table>
+        </div>
+
+        {/* Pagination */}
+        {!loading && filtered.length > PAGE_SIZE && (
+          <div className="flex items-center justify-between px-5 py-3 border-t border-indigo-50">
+            <span className="text-xs text-slate-400">Page {page} of {totalPages} · {filtered.length} records</span>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}
+                className="w-7 h-7 rounded-lg text-xs border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">←</button>
+              {Array.from({ length: Math.min(5, totalPages) }).map((_, i) => {
+                const pg = Math.max(1, Math.min(page - 2, totalPages - 4)) + i;
+                if (pg < 1 || pg > totalPages) return null;
+                return (
+                  <button key={pg} onClick={() => setPage(pg)}
+                    className={`w-7 h-7 rounded-lg text-xs font-semibold transition-colors ${pg === page ? "text-white" : "border border-slate-200 text-slate-500 hover:bg-slate-50"}`}
+                    style={pg === page ? { background:"linear-gradient(135deg,#4f46e5,#7c3aed)" } : {}}>
+                    {pg}
+                  </button>
+                );
+              })}
+              <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}
+                className="w-7 h-7 rounded-lg text-xs border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">→</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Log Detail Modal */}
+      {viewLog && <LogDetailModal log={viewLog} onClose={() => setViewLog(null)} />}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROOT EXPORT
+// ═══════════════════════════════════════════════════════════════════════════
+function AdminAuditLogsInner() {
+  const user = getStoredUser();
+  const [open, setOpen] = useState(false);
+  const [notifAssets, setNotifAssets] = useState([]);
+  const [notifMaint,  setNotifMaint]  = useState([]);
+
+  useEffect(() => {
+    Promise.all([api.get("/api/assets"), api.get("/api/maintenance")])
+      .then(([a, m]) => { setNotifAssets(a.data || []); setNotifMaint(m.data || []); })
+      .catch(() => {});
+  }, []);
+
+  const notifications = useMemo(() => buildNotifications(notifAssets, notifMaint), [notifAssets, notifMaint]);
+
+  if (user.role !== "Admin") return <AccessDenied />;
+
+  return (
+    <div className="flex min-h-screen" style={{ background:"linear-gradient(135deg,#f0f0ff 0%,#f5f9ff 50%,#f0fff8 100%)" }}>
+      <Sidebar mobileOpen={open} onClose={() => setOpen(false)} />
+      <div className="flex flex-col flex-1 min-w-0">
+        <Navbar onMenuToggle={() => setOpen(o => !o)} notifications={notifications} />
+        <main className="flex-1 p-3 sm:p-4 lg:p-6 overflow-auto">
+          <AuditLogsContent />
+        </main>
+      </div>
+    </div>
+  );
+}
+
+export default function AdminAuditLogs() {
+  return <ToastProvider><AdminAuditLogsInner /></ToastProvider>;
+}
