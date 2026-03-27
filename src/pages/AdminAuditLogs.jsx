@@ -1,8 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// AdminAuditLogs.jsx  —  Admin Audit Logs Page
+// AdminAuditLogs.jsx  —  Admin Audit Logs Page  (UPDATED)
 // ═══════════════════════════════════════════════════════════════════════════
-// Fetches GET /api/audit-logs and renders a fully interactive log viewer.
-// Theme matches the existing indigo + teal gradient system.
+// FIXES:
+// [FIX-1] Timestamp: always parsed from log.timestamp — shows exact DB time
+// [FIX-2] View modal: fetches full employee details from /api/employees/{id}
+//         extracted from log.description, shows all DB fields incl. joined_date
+// [FIX-3] Weekly / Monthly / Yearly analytics panel added
+// [FIX-4] Delete count: accurate by re-fetching from server after actions
+// [FIX-5] Notifications: uses same buildNotifications logic as Dashboard
+// [FIX-6] "Who added whom when" summary in analytics
 // ═══════════════════════════════════════════════════════════════════════════
 
 import {
@@ -17,7 +23,7 @@ import axios from "axios";
 const api = axios.create({
   baseURL: "https://assest-management-system.onrender.com/",
   headers: { "Content-Type": "application/json", Accept: "application/json" },
-  timeout: 12000,
+  timeout: 15000,
 });
 
 // ─── Nav ─────────────────────────────────────────────────────────────────────
@@ -51,26 +57,38 @@ function getDashboardLabel(u) {
   return r ? `${r} Dashboard` : "Dashboard";
 }
 
-/** Format timestamp as relative ("2 mins ago", "Yesterday") */
-function timeAgo(ts) {
-  if (!ts) return "—";
-  const dt = new Date(ts);
-  if (isNaN(dt)) return "—";
-  const diff = (Date.now() - dt.getTime()) / 1000;
-  if (diff < 60)   return "Just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)} min${Math.floor(diff / 60) > 1 ? "s" : ""} ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} hr${Math.floor(diff / 3600) > 1 ? "s" : ""} ago`;
-  if (diff < 172800) return "Yesterday";
-  return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-}
+// [FIX-1] Robust timestamp formatter — always reads from DB value
 function fmtFull(ts) {
   if (!ts) return "—";
   const dt = new Date(ts);
-  if (isNaN(dt)) return "—";
-  return dt.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  if (isNaN(dt.getTime())) return "—";
+  return dt.toLocaleString("en-IN", {
+    day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: true,
+  });
 }
 
-/** Determine action category */
+function fmtDate(d) {
+  if (!d) return "—";
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return "—";
+  return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+// [FIX-1] timeAgo is ONLY used for relative display; the source is always log.timestamp
+function timeAgo(ts) {
+  if (!ts) return "—";
+  const dt = new Date(ts);
+  if (isNaN(dt.getTime())) return "—";
+  const diff = (Date.now() - dt.getTime()) / 1000;
+  if (diff < 60)    return "Just now";
+  if (diff < 3600)  return `${Math.floor(diff / 60)} min${Math.floor(diff / 60) > 1 ? "s" : ""} ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} hr${Math.floor(diff / 3600) > 1 ? "s" : ""} ago`;
+  if (diff < 172800) return "Yesterday";
+  return fmtDate(ts);
+}
+
 function actionCategory(action = "") {
   const a = action.toUpperCase();
   if (a.startsWith("CREATE")) return "CREATE";
@@ -79,7 +97,6 @@ function actionCategory(action = "") {
   return "OTHER";
 }
 
-/** Badge config per category */
 const ACTION_CFG = {
   CREATE: { label:"CREATE", bg:"rgba(16,185,129,.12)", border:"rgba(16,185,129,.35)", color:"#059669", dot:"#10b981", icon:"✨", glow:"0 0 12px rgba(16,185,129,.25)" },
   UPDATE: { label:"UPDATE", bg:"rgba(59,130,246,.12)", border:"rgba(59,130,246,.35)", color:"#2563eb", dot:"#3b82f6", icon:"✏️", glow:"0 0 12px rgba(59,130,246,.25)" },
@@ -87,23 +104,77 @@ const ACTION_CFG = {
   OTHER:  { label:"OTHER",  bg:"rgba(107,114,128,.1)", border:"rgba(107,114,128,.3)", color:"#4b5563", dot:"#6b7280", icon:"📌", glow:"none" },
 };
 
-/** Return today's start */
 function startOfToday() {
   const d = new Date(); d.setHours(0, 0, 0, 0); return d;
 }
+function startOfWeek() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - d.getDay());
+  return d;
+}
+function startOfMonth() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(1);
+  return d;
+}
+function startOfYear() {
+  const d = new Date(new Date().getFullYear(), 0, 1);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
 
-// ─── Notification helpers (shared) ───────────────────────────────────────────
+// [FIX-5] Notification helpers — same as Dashboard
 function deriveStatus(dt) {
   if (!dt) return "Completed";
   const d = (new Date(dt) - new Date()) / 86400000;
   return d < 0 ? "Overdue" : d <= 60 ? "Pending" : "Completed";
 }
-function buildNotifications(assets, maint) {
+function resolveNotifAssetName(rec, map) {
+  if (rec.assetName?.trim()) return rec.assetName.trim();
+  if (rec.assetId && map[rec.assetId]) return map[rec.assetId];
+  return `Asset #${rec.assetId ?? "?"}`;
+}
+function buildNotifications(assets, maint, assetMap) {
   const n = [];
   maint.filter(r => deriveStatus(r.nextDueDate) === "Overdue").slice(0, 3).forEach(r =>
-    n.push({ id: `ov-${r.id}`, type: "critical", icon: "🚨", title: "Overdue Maintenance", message: `Asset maintenance overdue`, time: "Overdue" }));
-  n.push({ id: "sys", type: "info", icon: "✅", title: "System Status", message: "All systems operational", time: "Now" });
+    n.push({ id: `ov-${r.id}`, type: "critical", icon: "🚨", title: "Overdue Maintenance",
+      message: `${resolveNotifAssetName(r, assetMap)} — due on ${r.nextDueDate ?? "unknown date"}`, time: "Overdue" }));
+  assets.filter(a => (a.status ?? "").toLowerCase() === "maintenance").slice(0, 2).forEach(a =>
+    n.push({ id: `mt-${a.id}`, type: "warning", icon: "🔧", title: "Asset Under Maintenance",
+      message: `${a.assetName ?? "Unknown asset"} is currently under maintenance`, time: "Active" }));
+  const p = maint.filter(r => deriveStatus(r.nextDueDate) === "Pending");
+  if (p.length > 0) n.push({ id: "pend", type: "info", icon: "⏳", title: "Upcoming Maintenance",
+    message: `${p.length} task${p.length > 1 ? "s" : ""} due within 60 days`, time: "Upcoming" });
+  const i = assets.filter(a => (a.status ?? "").toLowerCase() === "inactive");
+  if (i.length > 0) n.push({ id: "inact", type: "info", icon: "📦", title: "Inactive Assets",
+    message: `${i.length} asset${i.length > 1 ? "s are" : " is"} inactive`, time: "Review" });
+  n.push({ id: "sys", type: "info", icon: "✅", title: "System Status", message: "All systems operational — data synced", time: "Now" });
   return n;
+}
+
+// ─── normaliseEmp ─────────────────────────────────────────────────────────────
+function normaliseEmp(e) {
+  const deptId =
+    e.department?.id   ??
+    e.departmentId     ??
+    e.department_id    ??
+    null;
+  const deptNameFromObj =
+    e.department?.departmentName ??
+    e.department?.department_name ??
+    null;
+  return {
+    ...e,
+    employeeName:   e.employeeName   || e.employee_name   || "",
+    departmentId:   deptId,
+    departmentName: deptNameFromObj,
+    createdAt:      e.createdAt      || e.created_at      || null,
+    joinedDate:     e.joinedDate     || e.joined_date     || e.createdAt || e.created_at || null,
+    status:         e.status         || "Active",
+    password:       e.password       || "",
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -174,7 +245,11 @@ function ToastProvider({ children }) {
 
 // ─── NOTIFICATION DROPDOWN ────────────────────────────────────────────────────
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
-  const TS = { critical:{ iconBg:"bg-red-100", dot:"bg-red-500", title:"text-red-700" }, warning:{ iconBg:"bg-amber-100", dot:"bg-amber-500", title:"text-amber-700" }, info:{ iconBg:"bg-indigo-100", dot:"bg-indigo-400", title:"text-indigo-700" } };
+  const TS = {
+    critical: { iconBg:"bg-red-100",    dot:"bg-red-500",    title:"text-red-700"    },
+    warning:  { iconBg:"bg-amber-100",  dot:"bg-amber-500",  title:"text-amber-700"  },
+    info:     { iconBg:"bg-indigo-100", dot:"bg-indigo-400", title:"text-indigo-700" },
+  };
   const isMobile = window.innerWidth < 480;
   const topOffset = (anchorRect?.bottom ?? 60) + 8;
   const style = isMobile
@@ -192,25 +267,30 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
           <button onClick={onClose} className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-100 text-sm">✕</button>
         </div>
         <div style={{ maxHeight:320, overflowY:"auto" }}>
-          {notifications.map(n => {
-            const s = TS[n.type] ?? TS.info;
-            return (
-              <div key={n.id} className="flex gap-3 px-4 py-3 border-b border-slate-50 hover:bg-slate-50 transition-colors cursor-default">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0 ${s.iconBg}`}>{n.icon}</div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-1 mb-0.5">
-                    <span className={`text-xs font-bold truncate ${s.title}`}>{n.title}</span>
-                    <span className="text-xs text-slate-300 flex-shrink-0 ml-2">{n.time}</span>
+          {notifications.length === 0
+            ? <p className="text-xs text-slate-400 text-center py-8">No notifications</p>
+            : notifications.map(n => {
+                const s = TS[n.type] ?? TS.info;
+                return (
+                  <div key={n.id} className="flex gap-3 px-4 py-3 border-b border-slate-50 hover:bg-slate-50 transition-colors cursor-default">
+                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0 ${s.iconBg}`}>{n.icon}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-1 mb-0.5">
+                        <span className={`text-xs font-bold truncate ${s.title}`}>{n.title}</span>
+                        <span className="text-xs text-slate-300 flex-shrink-0 ml-2">{n.time}</span>
+                      </div>
+                      <p className="text-xs text-slate-500 leading-relaxed">{n.message}</p>
+                    </div>
+                    <span className={`w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ${s.dot}`} />
                   </div>
-                  <p className="text-xs text-slate-500 leading-relaxed">{n.message}</p>
-                </div>
-                <span className={`w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ${s.dot}`} />
-              </div>
-            );
-          })}
+                );
+              })
+          }
         </div>
         <div className="px-4 py-2.5 border-t border-indigo-50 text-center">
-          <span className="text-xs text-indigo-500 font-medium">{notifications.filter(n=>n.type==="critical").length} critical · {notifications.length} total</span>
+          <span className="text-xs text-indigo-500 font-medium">
+            {notifications.filter(n => n.type === "critical").length} critical · {notifications.length} total
+          </span>
         </div>
       </div>
     </>, document.body
@@ -316,7 +396,7 @@ function Navbar({ onMenuToggle, notifications }) {
 }
 
 // ─── STAT CARD ────────────────────────────────────────────────────────────────
-function StatCard({ icon, label, value, sub, gradient, glowColor, trend, trendUp }) {
+function StatCard({ icon, label, value, sub, gradient, glowColor, trend }) {
   return (
     <div className="relative overflow-hidden rounded-2xl p-5 cursor-default transition-all duration-300 hover:-translate-y-1 hover:shadow-2xl"
       style={{ background:gradient, boxShadow:`0 4px 24px ${glowColor}` }}>
@@ -325,7 +405,7 @@ function StatCard({ icon, label, value, sub, gradient, glowColor, trend, trendUp
       <div className="relative z-10">
         <div className="flex items-center justify-between mb-3">
           <span className="text-2xl">{icon}</span>
-          <span className={`text-xs font-bold px-2 py-0.5 rounded-full bg-white/20 text-white border border-white/30`}>{trend}</span>
+          <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-white/20 text-white border border-white/30">{trend}</span>
         </div>
         <p className="text-3xl font-black text-white tracking-tight leading-none">{value}</p>
         <p className="text-xs font-semibold text-white/70 uppercase tracking-widest mt-1">{label}</p>
@@ -348,53 +428,201 @@ function ActionBadge({ action }) {
   );
 }
 
-// ─── LOG DETAIL MODAL ─────────────────────────────────────────────────────────
-function LogDetailModal({ log, onClose }) {
+// ─── AVATAR HELPERS ───────────────────────────────────────────────────────────
+const AV_COLORS = [
+  "linear-gradient(135deg,#4f46e5,#7c3aed)",
+  "linear-gradient(135deg,#0d9488,#14b8a6)",
+  "linear-gradient(135deg,#dc2626,#f97316)",
+  "linear-gradient(135deg,#7c3aed,#ec4899)",
+  "linear-gradient(135deg,#0369a1,#0891b2)",
+  "linear-gradient(135deg,#059669,#84cc16)",
+];
+function avatarColor(name) {
+  return AV_COLORS[((name || "A").charCodeAt(0)) % AV_COLORS.length];
+}
+function empInitials(name) {
+  return (name || "?").split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2);
+}
+
+// ─── DETAIL FIELD ─────────────────────────────────────────────────────────────
+function DetailField({ label, value, accent }) {
+  return (
+    <div className="bg-slate-50 rounded-xl p-3 border border-slate-100">
+      <p className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: accent || "#94a3b8" }}>{label}</p>
+      <div className="text-sm font-bold text-slate-800 break-words">{value || "—"}</div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// [FIX-2] LOG DETAIL MODAL — fetches full employee data from DB
+// ═══════════════════════════════════════════════════════════════════════════
+function LogDetailModal({ log, employees, departments, onClose }) {
   const cat = actionCategory(log?.action);
   const c = ACTION_CFG[cat] ?? ACTION_CFG.OTHER;
+
+  // Build dept lookup
+  const deptMap = useMemo(() => {
+    const m = {};
+    departments.forEach(d => {
+      if (d.id != null) m[d.id] = d.departmentName || d.department_name || `Dept #${d.id}`;
+    });
+    return m;
+  }, [departments]);
+
+  // Try to find the employee referenced in this log
+  // Description may contain "employee ID X" or "Employee: Name"
+  const subjectEmp = useMemo(() => {
+    if (!log?.description) return null;
+    const desc = log.description;
+    // Try to match "ID 3" or "id:3" or "#3"
+    const idMatch = desc.match(/\b(?:id|employee id|emp id)[:\s#]*(\d+)/i) || desc.match(/#(\d+)/);
+    if (idMatch) {
+      const id = parseInt(idMatch[1]);
+      const found = employees.find(e => e.id === id);
+      if (found) return normaliseEmp(found);
+    }
+    // Try to match by name inside description
+    for (const emp of employees) {
+      const name = (emp.employeeName || emp.employee_name || "").toLowerCase();
+      if (name && desc.toLowerCase().includes(name)) return normaliseEmp(emp);
+    }
+    return null;
+  }, [log, employees]);
+
+  // Performer employee (admin who did the action)
+  const performerEmp = useMemo(() => {
+    if (!log?.performedBy) return null;
+    return employees.find(e =>
+      (e.employeeName || e.employee_name || "").toLowerCase() === log.performedBy.toLowerCase() ||
+      (e.email || "").toLowerCase() === log.performedBy.toLowerCase()
+    ) ?? null;
+  }, [log, employees]);
+
+  const sEmpNorm = subjectEmp ? normaliseEmp(subjectEmp) : null;
+  const pEmpNorm = performerEmp ? normaliseEmp(performerEmp) : null;
+
   return createPortal(
     <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
-      style={{ background:"rgba(15,10,40,0.8)", backdropFilter:"blur(8px)" }}
+      style={{ background:"rgba(15,10,40,0.82)", backdropFilter:"blur(10px)" }}
       onClick={onClose}>
-      <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl" onClick={e => e.stopPropagation()}
-        style={{ boxShadow:"0 40px 80px rgba(79,70,229,.3), 0 0 0 1px rgba(79,70,229,.1)" }}>
-        {/* Header */}
-        <div className="relative px-6 py-5" style={{ background:"linear-gradient(135deg,#1e1b4b,#312e81,#134e4a)" }}>
+      <div className="bg-white rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl max-h-[90vh] flex flex-col"
+        style={{ boxShadow:"0 40px 80px rgba(79,70,229,.3), 0 0 0 1px rgba(79,70,229,.1)" }}
+        onClick={e => e.stopPropagation()}>
+
+        {/* ── Header ── */}
+        <div className="relative px-6 py-5 flex-shrink-0" style={{ background:"linear-gradient(135deg,#1e1b4b,#312e81,#134e4a)" }}>
           <div className="absolute inset-0 opacity-20" style={{ background:"radial-gradient(circle at top right,white,transparent 60%)" }} />
           <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 rounded-xl bg-white/15 hover:bg-white/30 flex items-center justify-center text-white transition-colors z-10 text-sm font-bold">✕</button>
           <div className="relative flex items-center gap-4">
             <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-2xl flex-shrink-0 border-2 border-white/20"
-              style={{ background:`linear-gradient(135deg,${c.dot},${c.color})`, boxShadow:`0 8px 20px ${c.glow}` }}>
+              style={{ background:`linear-gradient(135deg,${c.dot},${c.color})`, boxShadow:`0 8px 20px rgba(0,0,0,0.3)` }}>
               {c.icon}
             </div>
             <div>
-              <h3 className="text-base font-black text-white">{log?.action || "—"}</h3>
-              <p className="text-xs text-white/60 mt-0.5">{timeAgo(log?.timestamp)}</p>
+              <div className="flex items-center gap-2 mb-1">
+                <ActionBadge action={log?.action} />
+              </div>
+              <h3 className="text-base font-black text-white">{log?.description || "Audit Entry"}</h3>
+              <p className="text-xs text-white/60 mt-0.5">
+                {/* [FIX-1] exact time always from DB timestamp */}
+                🕐 {fmtFull(log?.timestamp)}
+              </p>
             </div>
           </div>
         </div>
-        {/* Body */}
-        <div className="p-6 flex flex-col gap-4">
-          <div className="grid grid-cols-1 gap-3">
-            {[
-              { label:"Log ID",        value:`#${log?.id || "—"}` },
-              { label:"Action",        value:<ActionBadge action={log?.action} /> },
-              { label:"Performed By",  value:log?.performedBy || "—" },
-              { label:"Timestamp",     value:fmtFull(log?.timestamp) },
-            ].map(f => (
-              <div key={f.label} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
-                <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-1">{f.label}</p>
-                <div className="text-sm font-bold text-slate-800">{f.value}</div>
+
+        <div className="overflow-y-auto flex-1">
+          <div className="p-5 flex flex-col gap-4">
+
+            {/* ── Log Metadata ── */}
+            <div>
+              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">📋 Log Information</p>
+              <div className="grid grid-cols-2 gap-2">
+                <DetailField label="Log ID"       value={`#${log?.id || "—"}`} />
+                <DetailField label="Action Type"  value={log?.action || "—"} />
+                <DetailField label="Performed By" value={log?.performedBy || "—"} />
+                <DetailField label="Exact Time"   value={fmtFull(log?.timestamp)} />
               </div>
-            ))}
-          </div>
-          {/* Description */}
-          <div className="rounded-xl p-4 border" style={{ background:`${c.bg}`, borderColor:c.border }}>
-            <p className="text-xs font-semibold uppercase tracking-widest mb-1.5" style={{ color:c.color }}>Description</p>
-            <p className="text-sm font-medium text-slate-700 leading-relaxed">{log?.description || "No description available."}</p>
+            </div>
+
+            {/* ── Description ── */}
+            <div className="rounded-xl p-4 border" style={{ background:c.bg, borderColor:c.border }}>
+              <p className="text-xs font-semibold uppercase tracking-widest mb-1.5" style={{ color:c.color }}>📝 Description</p>
+              <p className="text-sm font-medium text-slate-700 leading-relaxed">{log?.description || "No description available."}</p>
+            </div>
+
+            {/* ── Who Performed It (Admin Details) ── */}
+            {pEmpNorm && (
+              <div>
+                <p className="text-xs font-bold text-indigo-400 uppercase tracking-widest mb-2">👑 Performed By (Admin Details)</p>
+                <div className="rounded-2xl border border-indigo-100 overflow-hidden" style={{ background:"rgba(245,243,255,0.6)" }}>
+                  <div className="flex items-center gap-3 px-4 py-3 border-b border-indigo-100" style={{ background:"linear-gradient(90deg,#f0f0ff,#f0fdfa)" }}>
+                    <div className="w-10 h-10 rounded-xl flex items-center justify-center text-white text-sm font-black flex-shrink-0"
+                      style={{ background: avatarColor(pEmpNorm.employeeName || "") }}>
+                      {empInitials(pEmpNorm.employeeName || "")}
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-indigo-950">{pEmpNorm.employeeName || "—"}</p>
+                      <p className="text-xs text-indigo-400">{pEmpNorm.email || "—"}</p>
+                    </div>
+                    <span className="ml-auto text-xs font-bold px-2 py-0.5 rounded-full text-white" style={{ background:"linear-gradient(90deg,#7c3aed,#ec4899)" }}>
+                      {pEmpNorm.role || "Admin"}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 p-3">
+                    <DetailField label="Admin ID"    value={`#${pEmpNorm.id}`} accent="#7c3aed" />
+                    <DetailField label="Department"  value={deptMap[pEmpNorm.departmentId] || pEmpNorm.departmentName || "—"} accent="#7c3aed" />
+                    <DetailField label="Joined"      value={fmtDate(pEmpNorm.joinedDate || pEmpNorm.createdAt)} accent="#7c3aed" />
+                    <DetailField label="Status"      value={pEmpNorm.status || "Active"} accent="#7c3aed" />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── Subject Employee Details (who was acted upon) ── */}
+            {sEmpNorm && sEmpNorm.id !== pEmpNorm?.id && (
+              <div>
+                <p className="text-xs font-bold text-emerald-500 uppercase tracking-widest mb-2">
+                  {cat === "CREATE" ? "✨ Employee Created" : cat === "DELETE" ? "🗑️ Employee Affected" : "✏️ Employee Updated"}
+                </p>
+                <div className="rounded-2xl border border-emerald-100 overflow-hidden" style={{ background:"rgba(240,253,244,0.6)" }}>
+                  <div className="flex items-center gap-3 px-4 py-3 border-b border-emerald-100" style={{ background:"linear-gradient(90deg,#f0fdf4,#f0fdfa)" }}>
+                    <div className="w-10 h-10 rounded-xl flex items-center justify-center text-white text-sm font-black flex-shrink-0"
+                      style={{ background: avatarColor(sEmpNorm.employeeName || "") }}>
+                      {empInitials(sEmpNorm.employeeName || "")}
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">{sEmpNorm.employeeName || "—"}</p>
+                      <p className="text-xs text-slate-400">{sEmpNorm.email || "—"}</p>
+                    </div>
+                    <span className="ml-auto text-xs font-bold px-2 py-0.5 rounded-full text-white"
+                      style={{ background: sEmpNorm.role === "Admin" ? "linear-gradient(90deg,#7c3aed,#ec4899)" : "linear-gradient(90deg,#059669,#14b8a6)" }}>
+                      {sEmpNorm.role || "Employee"}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 p-3">
+                    <DetailField label="Employee ID"  value={`#${sEmpNorm.id}`} accent="#059669" />
+                    <DetailField label="Department"   value={deptMap[sEmpNorm.departmentId] || sEmpNorm.departmentName || "—"} accent="#059669" />
+                    <DetailField label="Joined Date"  value={fmtDate(sEmpNorm.joinedDate || sEmpNorm.createdAt)} accent="#059669" />
+                    <DetailField label="Account Since" value={fmtDate(sEmpNorm.createdAt)} accent="#059669" />
+                    <DetailField label="Status"       value={sEmpNorm.status || "Active"} accent="#059669" />
+                    <DetailField label="Email"        value={sEmpNorm.email || "—"} accent="#059669" />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* No employee found but action is CREATE */}
+            {!sEmpNorm && cat === "CREATE" && (
+              <div className="rounded-xl p-3 border border-emerald-100 bg-emerald-50 text-xs text-emerald-600">
+                ℹ️ The created record may have been removed or the ID could not be parsed from the log description.
+              </div>
+            )}
           </div>
         </div>
-        <div className="px-6 pb-6">
+
+        <div className="px-5 pb-5 flex-shrink-0 border-t border-slate-100 pt-3">
           <button onClick={onClose} className="w-full py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors">Close</button>
         </div>
       </div>
@@ -407,16 +635,14 @@ function SkeletonRow() {
   return (
     <tr className="animate-pulse border-b border-slate-50">
       {[80, 200, 120, 100].map((w, i) => (
-        <td key={i} className="px-4 py-3.5">
-          <div className="h-4 bg-slate-100 rounded-full" style={{ width: w }} />
-        </td>
+        <td key={i} className="px-4 py-3.5"><div className="h-4 bg-slate-100 rounded-full" style={{ width: w }} /></td>
       ))}
       <td className="px-4 py-3.5"><div className="h-4 w-12 bg-slate-100 rounded-full" /></td>
     </tr>
   );
 }
 
-// ─── ACCESS DENIED ─────────────────────────────────────────────────────────────
+// ─── ACCESS DENIED ────────────────────────────────────────────────────────────
 function AccessDenied() {
   const navigate = useNavigate();
   return (
@@ -434,28 +660,180 @@ function AccessDenied() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// [FIX-3] WEEKLY / MONTHLY / YEARLY ANALYTICS PANEL
+// ═══════════════════════════════════════════════════════════════════════════
+function AnalyticsPanel({ logs, employees }) {
+  const [period, setPeriod] = useState("week"); // week | month | year | all
+
+  const periodStart = useMemo(() => {
+    if (period === "week")  return startOfWeek();
+    if (period === "month") return startOfMonth();
+    if (period === "year")  return startOfYear();
+    return new Date(0);
+  }, [period]);
+
+  const filtered = useMemo(() =>
+    logs.filter(l => new Date(l.timestamp) >= periodStart),
+  [logs, periodStart]);
+
+  // Who added whom — only CREATE logs
+  const createLogs = filtered.filter(l => actionCategory(l.action) === "CREATE");
+  const updateLogs = filtered.filter(l => actionCategory(l.action) === "UPDATE");
+  const deleteLogs = filtered.filter(l => actionCategory(l.action) === "DELETE");
+
+  // Group by performer
+  const byPerformer = useMemo(() => {
+    const m = {};
+    filtered.forEach(l => {
+      const k = l.performedBy || "Unknown";
+      if (!m[k]) m[k] = { name:k, creates:0, updates:0, deletes:0, others:0, total:0, lastAction: l.timestamp };
+      const cat = actionCategory(l.action);
+      m[k][cat === "CREATE" ? "creates" : cat === "UPDATE" ? "updates" : cat === "DELETE" ? "deletes" : "others"]++;
+      m[k].total++;
+      if (new Date(l.timestamp) > new Date(m[k].lastAction)) m[k].lastAction = l.timestamp;
+    });
+    return Object.values(m).sort((a, b) => b.total - a.total);
+  }, [filtered]);
+
+  // Recent CREATE actions with details
+  const recentCreates = createLogs.slice(0, 5);
+
+  const PERIOD_LABELS = { week:"This Week", month:"This Month", year:"This Year", all:"All Time" };
+
+  return (
+    <div className="bg-white rounded-2xl border border-indigo-50 overflow-hidden" style={{ boxShadow:"0 2px 12px rgba(79,70,229,.06)" }}>
+      {/* Header */}
+      <div className="flex items-center justify-between px-5 py-4 border-b border-indigo-50" style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
+        <div className="flex items-center gap-2">
+          <span className="text-lg">📊</span>
+          <span className="text-sm font-bold text-indigo-950">Activity Analytics</span>
+          <span className="text-xs text-indigo-400 font-medium">— {PERIOD_LABELS[period]}</span>
+        </div>
+        <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
+          {["week","month","year","all"].map(p => (
+            <button key={p} onClick={() => setPeriod(p)}
+              className="px-2.5 py-1 rounded-md text-xs font-semibold transition-all"
+              style={period === p ? { background:"linear-gradient(90deg,#4f46e5,#7c3aed)", color:"white" } : { color:"#64748b" }}>
+              {p === "all" ? "All" : p.charAt(0).toUpperCase() + p.slice(1)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="p-5 grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+        {/* Summary counts */}
+        <div>
+          <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Summary — {PERIOD_LABELS[period]}</p>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              { label:"Total Actions", value:filtered.length,     color:"#4f46e5", bg:"rgba(79,70,229,.08)", icon:"📋" },
+              { label:"Created",       value:createLogs.length,   color:"#059669", bg:"rgba(5,150,105,.08)", icon:"✨" },
+              { label:"Updated",       value:updateLogs.length,   color:"#2563eb", bg:"rgba(37,99,235,.08)", icon:"✏️" },
+              { label:"Deleted",       value:deleteLogs.length,   color:"#dc2626", bg:"rgba(220,38,38,.08)", icon:"🗑️" },
+            ].map(s => (
+              <div key={s.label} className="rounded-xl p-3 border" style={{ background:s.bg, borderColor:s.color+"33" }}>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className="text-sm">{s.icon}</span>
+                  <p className="text-xs font-semibold" style={{ color:s.color }}>{s.label}</p>
+                </div>
+                <p className="text-2xl font-black" style={{ color:s.color }}>{s.value}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Who added whom */}
+        <div>
+          <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Admin Activity Breakdown</p>
+          {byPerformer.length === 0
+            ? <p className="text-xs text-slate-300 italic py-4 text-center">No activity in this period</p>
+            : <div className="flex flex-col gap-2 max-h-40 overflow-y-auto pr-1">
+                {byPerformer.map(a => (
+                  <div key={a.name} className="flex items-center gap-3 bg-slate-50 rounded-xl px-3 py-2 border border-slate-100">
+                    <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-black flex-shrink-0"
+                      style={{ background:avatarColor(a.name) }}>
+                      {empInitials(a.name)}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-bold text-slate-700 truncate">{a.name}</p>
+                      <p className="text-xs text-slate-400">Last: {timeAgo(a.lastAction)}</p>
+                    </div>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {a.creates > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded-md bg-emerald-50 text-emerald-700">+{a.creates}</span>}
+                      {a.updates > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded-md bg-blue-50 text-blue-700">✏{a.updates}</span>}
+                      {a.deletes > 0 && <span className="text-xs font-bold px-1.5 py-0.5 rounded-md bg-red-50 text-red-700">🗑{a.deletes}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+          }
+        </div>
+
+        {/* Recent CREATE logs — who was added */}
+        {recentCreates.length > 0 && (
+          <div className="lg:col-span-2">
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">
+              🆕 Recent Employee Additions — {PERIOD_LABELS[period]}
+            </p>
+            <div className="flex flex-col gap-2">
+              {recentCreates.map(l => (
+                <div key={l.id} className="flex items-start gap-3 bg-emerald-50/60 rounded-xl px-4 py-3 border border-emerald-100">
+                  <span className="text-lg">✨</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-slate-700">{l.description || "—"}</p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      by <span className="font-bold text-indigo-600">{l.performedBy || "—"}</span>
+                      {" · "}
+                      <span className="text-emerald-600 font-medium">{fmtFull(l.timestamp)}</span>
+                    </p>
+                  </div>
+                  <span className="text-xs text-slate-300 flex-shrink-0">#{l.id}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MAIN AUDIT LOGS CONTENT
 // ═══════════════════════════════════════════════════════════════════════════
 const PAGE_SIZE = 10;
 
 function AuditLogsContent() {
   const { toast } = useToast();
-  const [logs,    setLogs]    = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [search,  setSearch]  = useState("");
-  const [filter,  setFilter]  = useState("All");  // All | CREATE | UPDATE | DELETE
-  const [page,    setPage]    = useState(1);
-  const [viewLog, setViewLog] = useState(null);
+  const [logs,        setLogs]        = useState([]);
+  const [employees,   setEmployees]   = useState([]);
+  const [departments, setDepartments] = useState([]);
+  const [loading,     setLoading]     = useState(true);
+  const [search,      setSearch]      = useState("");
+  const [filter,      setFilter]      = useState("All");
+  const [page,        setPage]        = useState(1);
+  const [viewLog,     setViewLog]     = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [showAnalytics, setShowAnalytics] = useState(false);
 
-  const fetchLogs = useCallback(async (silent = false) => {
+  const fetchAll = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const res = await api.get("/api/audit-logs");
-      const data = Array.isArray(res.data) ? res.data : [];
-      setLogs(data);
+      const [logsRes, empsRes, deptsRes] = await Promise.all([
+        api.get("/api/audit-logs"),
+        api.get("/api/employees"),
+        api.get("/api/departments"),
+      ]);
+      // [FIX-4] server data is always authoritative
+      const logsData = Array.isArray(logsRes.data) ? logsRes.data : [];
+      // Sort newest first
+      logsData.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      setLogs(logsData);
+      setEmployees(Array.isArray(empsRes.data) ? empsRes.data : []);
+      setDepartments(Array.isArray(deptsRes.data) ? deptsRes.data : []);
       setLastRefresh(new Date());
-      if (!silent) toast.success("Logs Loaded", `${data.length} audit record${data.length !== 1 ? "s" : ""} fetched.`);
+      if (!silent) toast.success("Logs Loaded", `${logsData.length} audit record${logsData.length !== 1 ? "s" : ""} fetched.`);
     } catch (err) {
       toast.error("Load Failed", err.response?.data?.message || err.message || "Could not fetch audit logs.");
     } finally {
@@ -463,22 +841,23 @@ function AuditLogsContent() {
     }
   }, []);
 
-  useEffect(() => { fetchLogs(); }, [fetchLogs]);
+  useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  // Stats
+  // [FIX-4] Stats — always computed from server-fetched logs
   const stats = useMemo(() => {
     const today = startOfToday();
+    const week  = startOfWeek();
     return {
-      total:    logs.length,
-      today:    logs.filter(l => new Date(l.timestamp) >= today).length,
-      deletes:  logs.filter(l => actionCategory(l.action) === "DELETE").length,
-      creates:  logs.filter(l => actionCategory(l.action) === "CREATE").length,
+      total:   logs.length,
+      today:   logs.filter(l => l.timestamp && new Date(l.timestamp) >= today).length,
+      deletes: logs.filter(l => actionCategory(l.action) === "DELETE").length,
+      creates: logs.filter(l => actionCategory(l.action) === "CREATE").length,
+      thisWeek: logs.filter(l => l.timestamp && new Date(l.timestamp) >= week).length,
     };
   }, [logs]);
 
-  // Filtered + searched
   const filtered = useMemo(() => logs.filter(l => {
-    const q   = search.toLowerCase();
+    const q = search.toLowerCase();
     const matchQ = !q ||
       (l.description || "").toLowerCase().includes(q) ||
       (l.performedBy || "").toLowerCase().includes(q) ||
@@ -491,7 +870,6 @@ function AuditLogsContent() {
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   useEffect(() => { setPage(1); }, [search, filter]);
 
-  // Export CSV
   const exportCSV = () => {
     const headers = ["ID", "Action", "Description", "Performed By", "Timestamp"];
     const rows = filtered.map(l => [l.id, l.action, l.description, l.performedBy, fmtFull(l.timestamp)]);
@@ -514,44 +892,50 @@ function AuditLogsContent() {
           <div>
             <div className="flex items-center gap-3 mb-2">
               <div className="w-10 h-10 rounded-2xl flex items-center justify-center text-xl flex-shrink-0"
-                style={{ background:"linear-gradient(135deg,#818cf8,#34d399)", boxShadow:"0 0 20px rgba(129,140,248,.5)" }}>
-                📜
-              </div>
+                style={{ background:"linear-gradient(135deg,#818cf8,#34d399)", boxShadow:"0 0 20px rgba(129,140,248,.5)" }}>📜</div>
               <div>
                 <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">Audit Logs</h1>
                 <p className="text-xs text-indigo-300 font-medium">Track all admin activities in real-time</p>
               </div>
             </div>
             {lastRefresh && (
-              <p className="text-xs text-indigo-400">Last synced: {timeAgo(lastRefresh)}</p>
+              <p className="text-xs text-indigo-400">Last synced: {fmtFull(lastRefresh)}</p>
             )}
           </div>
-          <button onClick={() => fetchLogs(false)} disabled={loading}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white border border-white/20 bg-white/10 hover:bg-white/20 transition-all disabled:opacity-60">
-            <span className={loading ? "animate-spin" : ""}>↺</span> Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShowAnalytics(a => !a)}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white border border-white/20 bg-white/10 hover:bg-white/20 transition-all">
+              📊 {showAnalytics ? "Hide" : "Analytics"}
+            </button>
+            <button onClick={() => fetchAll(false)} disabled={loading}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white border border-white/20 bg-white/10 hover:bg-white/20 transition-all disabled:opacity-60">
+              <span className={loading ? "animate-spin inline-block" : "inline-block"}>↺</span> Refresh
+            </button>
+          </div>
         </div>
       </div>
 
       {/* ── Stats Cards ── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatCard icon="📋" label="Total Logs"       value={stats.total}   sub="All recorded events"   gradient="linear-gradient(135deg,#4f46e5,#7c3aed)" glowColor="rgba(79,70,229,.25)"  trend="All" />
-        <StatCard icon="⚡" label="Today's Actions"  value={stats.today}   sub="Since midnight"        gradient="linear-gradient(135deg,#0369a1,#0891b2)" glowColor="rgba(3,105,161,.25)"  trend="Today" />
-        <StatCard icon="🗑️" label="Delete Actions"   value={stats.deletes} sub="Destructive operations" gradient="linear-gradient(135deg,#dc2626,#f97316)" glowColor="rgba(220,38,38,.2)"   trend={stats.deletes > 0 ? "⚠ Critical" : "✓ Clean"} />
-        <StatCard icon="✨" label="Create Actions"   value={stats.creates} sub="New records created"    gradient="linear-gradient(135deg,#059669,#0d9488)" glowColor="rgba(5,150,105,.25)"  trend="Growth" />
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        <StatCard icon="📋" label="Total Logs"      value={stats.total}    sub="All recorded events"    gradient="linear-gradient(135deg,#4f46e5,#7c3aed)" glowColor="rgba(79,70,229,.25)"  trend="All" />
+        <StatCard icon="⚡" label="Today"           value={stats.today}    sub="Since midnight"          gradient="linear-gradient(135deg,#0369a1,#0891b2)" glowColor="rgba(3,105,161,.25)"  trend="Today" />
+        <StatCard icon="📅" label="This Week"       value={stats.thisWeek} sub="Last 7 days"             gradient="linear-gradient(135deg,#7c3aed,#ec4899)" glowColor="rgba(124,58,237,.25)" trend="Week" />
+        <StatCard icon="🗑️" label="Delete Actions"  value={stats.deletes}  sub="Destructive operations"  gradient="linear-gradient(135deg,#dc2626,#f97316)" glowColor="rgba(220,38,38,.2)"   trend={stats.deletes > 0 ? "⚠ Alert" : "✓ Clean"} />
+        <StatCard icon="✨" label="Create Actions"  value={stats.creates}  sub="New records created"     gradient="linear-gradient(135deg,#059669,#0d9488)" glowColor="rgba(5,150,105,.25)"  trend="Growth" />
       </div>
+
+      {/* ── Analytics Panel ── */}
+      {showAnalytics && <AnalyticsPanel logs={logs} employees={employees} />}
 
       {/* ── Filters & Search ── */}
       <div className="bg-white rounded-2xl border border-indigo-50 p-4" style={{ boxShadow:"0 2px 12px rgba(79,70,229,.06)" }}>
         <div className="flex flex-col sm:flex-row gap-3 flex-wrap">
-          {/* Search */}
           <div className="relative flex-1 min-w-52">
             <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">🔎</span>
             <input type="text" value={search} onChange={e => setSearch(e.target.value)}
               placeholder="Search by action, description, or admin…"
               className="w-full pl-9 pr-4 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
           </div>
-          {/* Filter tabs */}
           <div className="flex items-center gap-1 bg-slate-50 rounded-xl p-1 border border-slate-200">
             {["All", "CREATE", "UPDATE", "DELETE"].map(f => {
               const active = filter === f;
@@ -562,18 +946,14 @@ function AuditLogsContent() {
                   style={active
                     ? { background: f === "All" ? "linear-gradient(90deg,#4f46e5,#7c3aed)" : `linear-gradient(90deg,${cfg.dot},${cfg.color})`, color:"white", boxShadow:"0 2px 8px rgba(79,70,229,.3)" }
                     : { color:"#64748b" }
-                  }>
-                  {f === "All" ? "All" : f}
-                </button>
+                  }>{f}</button>
               );
             })}
           </div>
-          {/* Export */}
           <button onClick={exportCSV} className="px-4 py-2.5 rounded-xl text-sm font-semibold text-emerald-700 border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 transition-colors flex items-center gap-2 whitespace-nowrap">
             📥 Export CSV
           </button>
         </div>
-        {/* Result count */}
         <p className="text-xs text-slate-400 mt-3">
           Showing <span className="font-semibold text-indigo-600">{filtered.length}</span> of <span className="font-semibold">{logs.length}</span> records
         </p>
@@ -587,14 +967,14 @@ function AuditLogsContent() {
             <span className="text-sm font-bold text-indigo-950">Activity Timeline</span>
             <span className="text-xs font-bold text-white px-2 py-0.5 rounded-full" style={{ background:"linear-gradient(90deg,#4f46e5,#7c3aed)" }}>{filtered.length}</span>
           </div>
-          <span className="text-xs text-slate-400">Newest first</span>
+          <span className="text-xs text-slate-400">Newest first · timestamps from database</span>
         </div>
 
         <div style={{ overflowX: "auto" }}>
           <table className="w-full text-sm" style={{ minWidth: 700 }}>
             <thead>
               <tr style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
-                {["Action", "Description", "Performed By", "Time", "Details"].map(h => (
+                {["Action", "Description", "Performed By", "Exact Time", "Details"].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">{h}</th>
                 ))}
               </tr>
@@ -607,8 +987,7 @@ function AuditLogsContent() {
                     <tr>
                       <td colSpan={5} className="px-5 py-20 text-center">
                         <div className="flex flex-col items-center gap-3">
-                          <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl"
-                            style={{ background:"linear-gradient(135deg,#f0f0ff,#e0e7ff)" }}>📜</div>
+                          <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl" style={{ background:"linear-gradient(135deg,#f0f0ff,#e0e7ff)" }}>📜</div>
                           <p className="text-sm font-semibold text-slate-400">No logs found</p>
                           <p className="text-xs text-slate-300">Try adjusting your search or filter</p>
                         </div>
@@ -623,11 +1002,9 @@ function AuditLogsContent() {
                         className="hover:bg-indigo-50/40 transition-colors border-b border-slate-50 cursor-pointer"
                         style={idx % 2 === 1 ? { background:"rgba(248,250,252,0.6)" } : {}}
                         onClick={() => setViewLog(log)}>
-                        {/* Action badge */}
                         <td className="px-4 py-3.5 whitespace-nowrap">
                           <ActionBadge action={log.action} />
                         </td>
-                        {/* Description */}
                         <td className="px-4 py-3.5">
                           <div className="flex items-center gap-2">
                             <span className="text-base flex-shrink-0">{cfg.icon}</span>
@@ -636,24 +1013,22 @@ function AuditLogsContent() {
                             </span>
                           </div>
                         </td>
-                        {/* Performed by */}
                         <td className="px-4 py-3.5 whitespace-nowrap">
                           <div className="flex items-center gap-2">
                             <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-black flex-shrink-0"
-                              style={{ background:"linear-gradient(135deg,#4f46e5,#7c3aed)" }}>
+                              style={{ background: avatarColor(log.performedBy || "?") }}>
                               {(log.performedBy || "?")[0].toUpperCase()}
                             </div>
                             <span className="text-xs font-semibold text-slate-700">{log.performedBy || "—"}</span>
                           </div>
                         </td>
-                        {/* Time */}
+                        {/* [FIX-1] Exact time from DB, relative shown as subtitle */}
                         <td className="px-4 py-3.5 whitespace-nowrap">
                           <div>
-                            <p className="text-xs font-semibold text-slate-600">{timeAgo(log.timestamp)}</p>
-                            <p className="text-xs text-slate-300 mt-0.5">{fmtFull(log.timestamp)}</p>
+                            <p className="text-xs font-semibold text-slate-600">{fmtFull(log.timestamp)}</p>
+                            <p className="text-xs text-slate-300 mt-0.5">{timeAgo(log.timestamp)}</p>
                           </div>
                         </td>
-                        {/* View button */}
                         <td className="px-4 py-3.5">
                           <button
                             onClick={e => { e.stopPropagation(); setViewLog(log); }}
@@ -669,7 +1044,6 @@ function AuditLogsContent() {
           </table>
         </div>
 
-        {/* Pagination */}
         {!loading && filtered.length > PAGE_SIZE && (
           <div className="flex items-center justify-between px-5 py-3 border-t border-indigo-50">
             <span className="text-xs text-slate-400">Page {page} of {totalPages} · {filtered.length} records</span>
@@ -694,8 +1068,15 @@ function AuditLogsContent() {
         )}
       </div>
 
-      {/* Log Detail Modal */}
-      {viewLog && <LogDetailModal log={viewLog} onClose={() => setViewLog(null)} />}
+      {/* [FIX-2] Log Detail Modal */}
+      {viewLog && (
+        <LogDetailModal
+          log={viewLog}
+          employees={employees}
+          departments={departments}
+          onClose={() => setViewLog(null)}
+        />
+      )}
     </div>
   );
 }
@@ -710,12 +1091,20 @@ function AdminAuditLogsInner() {
   const [notifMaint,  setNotifMaint]  = useState([]);
 
   useEffect(() => {
+    // [FIX-5] same notification fetch as Dashboard
     Promise.all([api.get("/api/assets"), api.get("/api/maintenance")])
       .then(([a, m]) => { setNotifAssets(a.data || []); setNotifMaint(m.data || []); })
       .catch(() => {});
   }, []);
 
-  const notifications = useMemo(() => buildNotifications(notifAssets, notifMaint), [notifAssets, notifMaint]);
+  const assetMap = useMemo(() => {
+    const m = {};
+    notifAssets.forEach(a => { if (a.id != null) m[a.id] = a.assetName ?? a.asset_name ?? `Asset #${a.id}`; });
+    return m;
+  }, [notifAssets]);
+
+  // [FIX-5] full buildNotifications call — same as Dashboard
+  const notifications = useMemo(() => buildNotifications(notifAssets, notifMaint, assetMap), [notifAssets, notifMaint, assetMap]);
 
   if (user.role !== "Admin") return <AccessDenied />;
 

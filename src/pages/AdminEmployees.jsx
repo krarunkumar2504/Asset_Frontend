@@ -1,27 +1,20 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// AdminEmployeeManagement.jsx  —  FIXED VERSION
+// AdminEmployeeManagement.jsx  —  UPDATED VERSION
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// KEY FIXES IN THIS VERSION:
+// UPDATES IN THIS VERSION:
 //
-// [ROOT-FIX-1] normaliseEmp — reads e.department?.id for departmentId
-//   Spring Boot returns { department: { id:1, departmentName:"IT" } }
-//   NOT a flat departmentId field. Now correctly extracts it.
+// [UPD-1] joined_date — fetched and displayed everywhere (table, view modal,
+//         create form). normaliseEmp reads e.joined_date from DB correctly.
 //
-// [ROOT-FIX-2] Department column & filter — now work because departmentId
-//   is correctly populated from the nested department object.
+// [UPD-2] Notifications — uses full buildNotifications() same as Dashboard.
+//         Includes overdue maintenance, assets under maintenance, pending
+//         tasks, inactive assets, and system status.
 //
-// [ROOT-FIX-3] Update payload — sends department: { id } which the Java
-//   controller can resolve. Also sends password and status so they persist.
+// [UPD-3] Status column — correctly fetched from DB (status field added via
+//         ALTER TABLE employees ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'Active')
 //
-// [ROOT-FIX-4] Delete — no optimistic removal. Wait for fetchAll to settle
-//   so counts are always accurate and never flicker.
-//
-// [ROOT-FIX-5] Status filter — works because normaliseEmp now reads
-//   e.status correctly (column exists in DB via Employee model).
-//
-// [ROOT-FIX-6] Stats — derived purely from the synced employees array,
-//   no optimistic deltas that can desync.
+// All previous ROOT-FIX-* fixes from original version are retained.
 //
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -50,6 +43,7 @@ const NAV_ITEMS = [
 const ADMIN_NAV_ITEMS = [
   { label: "Create Employee",  icon: "👤", path: "/create-employee"  },
   { label: "Manage Employees", icon: "🏢", path: "/admin/employees"  },
+  { label: "Audit Logs",       icon: "📜", path: "/audit-logs"       },
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -75,6 +69,15 @@ function fmtDate(d) {
   if (isNaN(dt.getTime())) return "—";
   return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
+function fmtFull(ts) {
+  if (!ts) return "—";
+  const dt = new Date(ts);
+  if (isNaN(dt.getTime())) return "—";
+  return dt.toLocaleString("en-IN", {
+    day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true,
+  });
+}
 function empInitials(name) {
   return (name || "?").split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2);
 }
@@ -90,38 +93,37 @@ function avatarColor(name) {
   return AV_COLORS[((name || "A").charCodeAt(0)) % AV_COLORS.length];
 }
 
-// ─── [ROOT-FIX-1] normaliseEmp ───────────────────────────────────────────────
-// Spring Boot with @ManyToOne returns:
-//   { id, employee_name, email, role, password, status, created_at,
-//     department: { id, department_name, location, budget, created_at } }
-// We must read department?.id for departmentId — NOT e.department_id.
+// ─── [UPD-1] normaliseEmp — reads joined_date from DB ────────────────────────
 function normaliseEmp(e) {
-  // Extract departmentId from nested object OR flat field (whichever exists)
   const deptId =
-    e.department?.id            ??   // ← Spring Boot nested object (primary)
-    e.departmentId              ??   // ← already normalised
-    e.department_id             ??   // ← flat snake_case fallback
+    e.department?.id  ??
+    e.departmentId    ??
+    e.department_id   ??
     null;
-
-  // Extract department name directly from nested object if present
   const deptNameFromObj =
     e.department?.departmentName ??
     e.department?.department_name ??
     null;
 
+  // joined_date: prefer explicit joined_date/joinedDate, fallback to created_at
+  const joinedDate =
+    e.joinedDate    ??  // Spring Boot camelCase
+    e.joined_date   ??  // DB snake_case
+    null;
+
   return {
     ...e,
-    employeeName:    e.employeeName    || e.employee_name    || "",
-    departmentId:    deptId,
-    departmentName:  deptNameFromObj,  // bonus: name already in payload
-    createdAt:       e.createdAt       || e.created_at       || null,
-    joinedDate:      e.joinedDate      || e.joined_date      || e.createdAt || e.created_at || null,
-    status:          e.status          || "Active",
-    password:        e.password        || "",
+    employeeName:   e.employeeName   || e.employee_name   || "",
+    departmentId:   deptId,
+    departmentName: deptNameFromObj,
+    createdAt:      e.createdAt      || e.created_at      || null,
+    joinedDate,                                             // ← [UPD-1] explicit
+    status:         e.status         || "Active",
+    password:       e.password       || "",
   };
 }
 
-// ─── Notification helpers ────────────────────────────────────────────────────
+// ─── [UPD-2] Notification helpers — same as Dashboard ────────────────────────
 function deriveStatus(dt) {
   if (!dt) return "Completed";
   const d = (new Date(dt) - new Date()) / 86400000;
@@ -139,7 +141,7 @@ function buildNotifications(assets, maint, assetMap) {
       message: `${resolveNotifAssetName(r, assetMap)} — due on ${r.nextDueDate ?? "unknown date"}`, time: "Overdue" }));
   assets.filter(a => (a.status ?? "").toLowerCase() === "maintenance").slice(0, 2).forEach(a =>
     n.push({ id: `mt-${a.id}`, type: "warning", icon: "🔧", title: "Asset Under Maintenance",
-      message: `${a.assetName ?? "Unknown asset"} is currently under maintenance`, time: "Active" }));
+      message: `${a.assetName ?? a.asset_name ?? "Unknown asset"} is currently under maintenance`, time: "Active" }));
   const p = maint.filter(r => deriveStatus(r.nextDueDate) === "Pending");
   if (p.length > 0) n.push({ id: "pend", type: "info", icon: "⏳", title: "Upcoming Maintenance",
     message: `${p.length} task${p.length > 1 ? "s" : ""} due within 60 days`, time: "Upcoming" });
@@ -393,7 +395,7 @@ function StatusBadge({ status }) {
 function SkeletonRow() {
   return (
     <tr className="animate-pulse">
-      {[32,40,120,100,60,70,80,70,80,60].map((w,i) => (
+      {[32,40,120,100,60,70,80,70,80,90,60].map((w,i) => (
         <td key={i} className="px-3 py-3"><div className="h-3.5 bg-slate-100 rounded-full" style={{ width:w }} /></td>
       ))}
     </tr>
@@ -421,15 +423,16 @@ function StatCard({ icon, label, value, sub, gradient, glowColor, trend }) {
   );
 }
 
-// ─── VIEW MODAL ───────────────────────────────────────────────────────────────
+// ─── VIEW MODAL — [UPD-1] shows joined_date from DB ──────────────────────────
 function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
   const deptName = deptMap[employee?.departmentId] || employee?.departmentName || "—";
   return createPortal(
     <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
       style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }}
       onClick={onClose}>
-      <div className="bg-white rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl" onClick={e => e.stopPropagation()}>
-        <div className="relative px-6 py-6 text-white" style={{ background:"linear-gradient(135deg,#1e1b4b,#312e81,#134e4a)" }}>
+      <div className="bg-white rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="relative px-6 py-6 text-white flex-shrink-0" style={{ background:"linear-gradient(135deg,#1e1b4b,#312e81,#134e4a)" }}>
           <div className="absolute inset-0 opacity-20" style={{ background:"radial-gradient(circle at top right,white,transparent 60%)" }} />
           <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 rounded-xl bg-white/15 hover:bg-white/30 flex items-center justify-center text-white transition-colors z-10 text-sm font-bold">✕</button>
           <div className="relative flex items-center gap-4">
@@ -446,13 +449,17 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
             </div>
           </div>
         </div>
-        <div className="p-6 flex flex-col gap-4">
+
+        <div className="p-6 flex flex-col gap-4 overflow-y-auto">
           <div className="grid grid-cols-2 gap-3">
             {[
-              { label:"Employee ID",  value:`#${employee?.id||"—"}` },
-              { label:"Department",   value:deptName },
-              { label:"Joined Date",  value:fmtDate(employee?.joinedDate||employee?.createdAt) },
-              { label:"Role",         value:employee?.role||"—" },
+              { label:"Employee ID",   value:`#${employee?.id||"—"}` },
+              { label:"Department",    value:deptName },
+              // [UPD-1] Joined Date from DB joined_date column
+              { label:"Joined Date",   value:fmtDate(employee?.joinedDate) },
+              { label:"Account Since", value:fmtFull(employee?.createdAt) },
+              { label:"Role",          value:employee?.role||"—" },
+              { label:"Status",        value:employee?.status||"Active" },
             ].map(f => (
               <div key={f.label} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-0.5">{f.label}</p>
@@ -460,6 +467,8 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
               </div>
             ))}
           </div>
+
+          {/* Assigned Assets */}
           <div>
             <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2">Assigned Assets</p>
             {assignedAssets.length === 0
@@ -471,6 +480,7 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
                       <div className="flex-1 min-w-0">
                         <p className="text-xs font-semibold text-indigo-800 truncate">{a.assetName||a.asset_name||`Asset #${a.assetId||a.asset_id||"?"}`}</p>
                         {a.assignmentStatus && <p className="text-xs text-indigo-400 capitalize">{a.assignmentStatus}</p>}
+                        {a.assignedDate && <p className="text-xs text-slate-400">Assigned: {fmtDate(a.assignedDate || a.assigned_date)}</p>}
                       </div>
                     </div>
                   ))}
@@ -478,7 +488,8 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
             }
           </div>
         </div>
-        <div className="px-6 pb-6">
+
+        <div className="px-6 pb-6 flex-shrink-0">
           <button onClick={onClose} className="w-full py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors">Close</button>
         </div>
       </div>
@@ -492,10 +503,13 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
     employeeName: employee?.employeeName || "",
     email:        employee?.email        || "",
     role:         employee?.role         || "Employee",
-    // [ROOT-FIX-3] use departmentId which is now correctly populated
     departmentId: employee?.departmentId != null ? String(employee.departmentId) : "",
     status:       employee?.status       || "Active",
     password:     "",
+    // [UPD-1] edit joined_date too
+    joinedDate:   employee?.joinedDate
+      ? (typeof employee.joinedDate === "string" ? employee.joinedDate.split("T")[0] : "")
+      : "",
   });
   const [showPass, setShowPass] = useState(false);
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
@@ -553,6 +567,12 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
               <option value="">— No Department —</option>
               {departments.map(d => <option key={d.id} value={String(d.id)}>{d.departmentName||d.department_name}</option>)}
             </select>
+          </div>
+          {/* [UPD-1] Joined Date edit */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Joined Date</label>
+            <input type="date" value={form.joinedDate} onChange={e => set("joinedDate",e.target.value)}
+              className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all text-slate-700" />
           </div>
         </div>
         <div className="flex gap-3 px-6 pb-6 flex-shrink-0">
@@ -639,22 +659,21 @@ function EmployeeManagementContent() {
   const [showBulkConfirm, setShowBulkConfirm] = useState(false);
   const [bulkDelLoading,  setBulkDelLoading]  = useState(false);
   const [showCreate,      setShowCreate]      = useState(false);
-  const [createForm,      setCreateForm]      = useState({ employeeName:"", email:"", password:"", role:"Employee", departmentId:"", joinedDate:"" });
-  const [createLoading,   setCreateLoading]   = useState(false);
-  const [createError,     setCreateError]     = useState("");
+  // [UPD-1] create form includes joinedDate
+  const [createForm, setCreateForm] = useState({
+    employeeName:"", email:"", password:"", role:"Employee", departmentId:"", joinedDate:""
+  });
+  const [createLoading, setCreateLoading] = useState(false);
+  const [createError,   setCreateError]   = useState("");
 
-  // [ROOT-FIX-2] deptMap — keyed by id, value is department name
   const deptMap = useMemo(() => {
     const m = {};
     departments.forEach(d => {
-      if (d.id != null) {
-        m[d.id] = d.departmentName || d.department_name || `Dept #${d.id}`;
-      }
+      if (d.id != null) m[d.id] = d.departmentName || d.department_name || `Dept #${d.id}`;
     });
     return m;
   }, [departments]);
 
-  // [ROOT-FIX-4] fetchAll — single source of truth, no optimistic updates
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
@@ -664,7 +683,6 @@ function EmployeeManagementContent() {
       ]);
       const rawEmps  = Array.isArray(empRes.data)  ? empRes.data  : [];
       const rawDepts = Array.isArray(deptRes.data) ? deptRes.data : [];
-      // Sort by id ascending
       setEmployees(rawEmps.map(normaliseEmp).sort((a, b) => a.id - b.id));
       setDepartments(rawDepts);
     } catch (err) {
@@ -676,7 +694,6 @@ function EmployeeManagementContent() {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  // [ROOT-FIX-6] Stats — always from settled employees array
   const stats = useMemo(() => ({
     total:   employees.length,
     active:  employees.filter(e => (e.status || "Active") === "Active").length,
@@ -684,34 +701,27 @@ function EmployeeManagementContent() {
     admins:  employees.filter(e => e.role === "Admin").length,
   }), [employees]);
 
-  // [ROOT-FIX-5] Filtering — departmentId is now correctly populated
   const filtered = useMemo(() => employees.filter(e => {
     const q      = search.toLowerCase();
     const matchQ = !q || (e.employeeName||"").toLowerCase().includes(q) || (e.email||"").toLowerCase().includes(q);
     const matchR = filterRole   === "All" || e.role === filterRole;
     const matchS = filterStatus === "All" || (e.status || "Active") === filterStatus;
-    // departmentId is now a real number from normaliseEmp, compare as strings
     const matchD = filterDept   === "All" || String(e.departmentId) === filterDept;
     return matchQ && matchR && matchS && matchD;
   }), [employees, search, filterRole, filterStatus, filterDept]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const paged      = filtered.slice((page-1)*PAGE_SIZE, page*PAGE_SIZE);
-
   useEffect(() => { setPage(1); setSelected(new Set()); }, [search, filterRole, filterStatus, filterDept]);
 
-  // Load assigned assets for view modal
   const openView = async emp => {
     setViewEmp(emp); setAssignedAssets([]);
     try {
       const r = await api.get(`/api/asset-assignments/employee/${emp.id}`);
       setAssignedAssets(Array.isArray(r.data) ? r.data : []);
-    } catch {
-      setAssignedAssets([]);
-    }
+    } catch { setAssignedAssets([]); }
   };
 
-  // [ROOT-FIX-3] Edit — correct payload with nested department object
   const handleEdit = async form => {
     setActionLoading(true);
     try {
@@ -720,20 +730,17 @@ function EmployeeManagementContent() {
         employee_name: form.employeeName,
         email:         form.email,
         role:          form.role,
-        status:        form.status,      // ← persisted by fixed Java controller
-        // Send nested department object — that's what Spring Boot @ManyToOne expects
-        department: form.departmentId
-          ? { id: Number(form.departmentId) }
-          : null,
+        status:        form.status,
+        department: form.departmentId ? { id: Number(form.departmentId) } : null,
+        // [UPD-1] send joined_date to backend
+        joinedDate:  form.joinedDate || null,
+        joined_date: form.joinedDate || null,
       };
-      // Only send password if admin actually typed something
-      if (form.password?.trim()) {
-        payload.password = form.password.trim();
-      }
+      if (form.password?.trim()) payload.password = form.password.trim();
       await api.put(`/api/employees/${editEmp.id}`, payload);
       toast.success("Updated", `${form.employeeName} updated successfully.`);
       setEditEmp(null);
-      await fetchAll(); // re-sync — stats + department + status all refresh
+      await fetchAll();
     } catch (err) {
       toast.error("Update Failed", err.response?.data?.message || err.message);
     } finally {
@@ -741,7 +748,6 @@ function EmployeeManagementContent() {
     }
   };
 
-  // [ROOT-FIX-4] Delete — no optimistic update, wait for fetchAll
   const handleDelete = async () => {
     setActionLoading(true);
     const target = deleteEmp;
@@ -757,11 +763,10 @@ function EmployeeManagementContent() {
       toast.error("Delete Failed", msg);
     } finally {
       setActionLoading(false);
-      await fetchAll(); // always re-sync so count is accurate
+      await fetchAll(); // always re-sync from server
     }
   };
 
-  // Bulk delete
   const handleBulkDelete = async () => {
     setBulkDelLoading(true);
     const ids = [...selected];
@@ -779,7 +784,6 @@ function EmployeeManagementContent() {
     setBulkDelLoading(false);
   };
 
-  // Create employee
   const handleCreate = async () => {
     setCreateError("");
     const { employeeName, email, password, role, departmentId } = createForm;
@@ -793,13 +797,13 @@ function EmployeeManagementContent() {
     setCreateLoading(true);
     try {
       await api.post("/api/employees", {
-        employeeName: employeeName.trim(),
+        employeeName:  employeeName.trim(),
         employee_name: employeeName.trim(),
-        email: email.trim(),
+        email:         email.trim(),
         password,
         role,
-        // nested department object for Spring Boot
-        department: { id: Number(departmentId) },
+        department:  { id: Number(departmentId) },
+        // [UPD-1] send joined_date on create
         joinedDate:  createForm.joinedDate || null,
         joined_date: createForm.joinedDate || null,
       });
@@ -816,18 +820,23 @@ function EmployeeManagementContent() {
     }
   };
 
-  // CSV export
   const exportCSV = () => {
-    const headers = ["ID","Name","Email","Role","Department","Status","Joined"];
-    const rows    = filtered.map(e => [e.id, e.employeeName, e.email, e.role, deptMap[e.departmentId]||"—", e.status||"Active", fmtDate(e.joinedDate||e.createdAt)]);
-    const csv     = [headers,...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+    // [UPD-1] includes Joined Date column
+    const headers = ["ID","Name","Email","Role","Department","Status","Joined Date","Account Since"];
+    const rows    = filtered.map(e => [
+      e.id, e.employeeName, e.email, e.role,
+      deptMap[e.departmentId]||"—",
+      e.status||"Active",
+      fmtDate(e.joinedDate),        // ← [UPD-1]
+      fmtDate(e.createdAt),
+    ]);
+    const csv = [headers,...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
     a.download = "employees.csv"; a.click(); URL.revokeObjectURL(a.href);
     toast.success("Export Done", `${filtered.length} records exported.`);
   };
 
-  // Selection
   const toggleSelect = id => setSelected(p => { const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n; });
   const toggleAll = () => {
     if (paged.every(e => selected.has(e.id))) setSelected(p => { const n=new Set(p); paged.forEach(e=>n.delete(e.id)); return n; });
@@ -836,7 +845,6 @@ function EmployeeManagementContent() {
   const allPageSel  = paged.length>0 && paged.every(e=>selected.has(e.id));
   const somePageSel = paged.some(e=>selected.has(e.id)) && !allPageSel;
 
-  // Department filter options
   const deptOptions = useMemo(() =>
     departments.map(d => ({ id:d.id, name:d.departmentName||d.department_name||`Dept #${d.id}` })),
   [departments]);
@@ -872,7 +880,6 @@ function EmployeeManagementContent() {
             <option value="Inactive">Inactive</option>
             <option value="Removed">Removed</option>
           </select>
-          {/* [ROOT-FIX-2] Department filter — value is String(id) matching String(e.departmentId) */}
           <select value={filterDept} onChange={e=>setFilterDept(e.target.value)} className="px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white text-slate-700 transition-all">
             <option value="All">All Departments</option>
             {deptOptions.map(d => <option key={d.id} value={String(d.id)}>{d.name}</option>)}
@@ -896,26 +903,20 @@ function EmployeeManagementContent() {
           <span className="text-xs text-slate-400">{filtered.length} result{filtered.length!==1?"s":""}</span>
         </div>
         <div style={{ overflowX:"auto" }}>
-          <table className="w-full text-sm" style={{ minWidth:900 }}>
+          <table className="w-full text-sm" style={{ minWidth:1000 }}>
             <thead>
               <tr style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
                 <th className="px-3 py-3 w-8"><Checkbox checked={allPageSel} onChange={toggleAll} indeterminate={somePageSel} /></th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">#ID</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Profile</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Email</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Password</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Role</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Department</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Status</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Joined</th>
-                <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Actions</th>
+                {["#ID","Profile","Email","Password","Role","Department","Status","Joined Date","Account Since","Actions"].map(h => (
+                  <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">{h}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
               {loading
                 ? Array.from({length:6}).map((_,i) => <SkeletonRow key={i} />)
                 : paged.length === 0
-                  ? <tr><td colSpan={10} className="px-5 py-16 text-center">
+                  ? <tr><td colSpan={11} className="px-5 py-16 text-center">
                       <div className="flex flex-col items-center gap-3">
                         <span className="text-4xl">🔍</span>
                         <p className="text-sm font-semibold text-slate-400">No employees found</p>
@@ -924,7 +925,6 @@ function EmployeeManagementContent() {
                     </td></tr>
                   : paged.map((emp, idx) => {
                       const isChecked = selected.has(emp.id);
-                      // [ROOT-FIX-2] deptMap[emp.departmentId] now works correctly
                       const deptName = deptMap[emp.departmentId] || emp.departmentName || "—";
                       return (
                         <tr key={emp.id} className={`hover:bg-indigo-50/40 transition-colors border-b border-slate-50 ${isChecked?"bg-indigo-50/60":idx%2===1?"bg-slate-50/40":""}`}>
@@ -943,7 +943,15 @@ function EmployeeManagementContent() {
                             <span className="text-xs font-medium bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-md whitespace-nowrap">{deptName}</span>
                           </td>
                           <td className="px-3 py-3"><StatusBadge status={emp.status||"Active"} /></td>
-                          <td className="px-3 py-3 text-xs text-slate-400 whitespace-nowrap">{fmtDate(emp.joinedDate||emp.createdAt)}</td>
+                          {/* [UPD-1] Joined Date column */}
+                          <td className="px-3 py-3 text-xs text-slate-600 whitespace-nowrap font-medium">
+                            {emp.joinedDate ? (
+                              <span className="bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-md border border-emerald-100">{fmtDate(emp.joinedDate)}</span>
+                            ) : (
+                              <span className="text-slate-300 italic">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-3 text-xs text-slate-400 whitespace-nowrap">{fmtDate(emp.createdAt)}</td>
                           <td className="px-3 py-3">
                             <div className="flex items-center gap-1.5">
                               <button onClick={()=>openView(emp)} title="View" className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-indigo-100 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">👁</button>
@@ -1005,7 +1013,7 @@ function EmployeeManagementContent() {
       {/* Create Employee panel */}
       {showCreate && createPortal(
         <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4" style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }} onClick={()=>setShowCreate(false)}>
-          <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl max-h-[90vh] flex flex-col" onClick={e=>e.stopPropagation()}>
+          <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl max-h-[92vh] flex flex-col" onClick={e=>e.stopPropagation()}>
             <div className="px-6 py-4 border-b border-indigo-50 flex items-center justify-between flex-shrink-0" style={{ background:"linear-gradient(90deg,#f0f0ff,#f0fdfa)" }}>
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center text-lg" style={{ background:"linear-gradient(135deg,#818cf8,#34d399)" }}>👤</div>
@@ -1042,6 +1050,7 @@ function EmployeeManagementContent() {
                   </select>
                 </div>
               </div>
+              {/* [UPD-1] Joined Date in create form */}
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Joined Date</label>
                 <input type="date" value={createForm.joinedDate} onChange={e=>setCreateForm(p=>({...p,joinedDate:e.target.value}))}
@@ -1072,18 +1081,27 @@ function AdminEmployeeInner() {
   const [notifMaint,  setNotifMaint]  = useState([]);
 
   useEffect(() => {
+    // [UPD-2] same API calls as Dashboard for accurate notifications
     Promise.all([api.get("/api/assets"), api.get("/api/maintenance")])
-      .then(([a, m]) => { setNotifAssets(a.data||[]); setNotifMaint(m.data||[]); })
+      .then(([a, m]) => {
+        setNotifAssets(Array.isArray(a.data) ? a.data : []);
+        setNotifMaint(Array.isArray(m.data) ? m.data : []);
+      })
       .catch(() => {});
   }, []);
 
   const assetMap = useMemo(() => {
     const m = {};
-    notifAssets.forEach(a => { if (a.id!=null) m[a.id] = a.assetName??a.name??`Asset #${a.id}`; });
+    notifAssets.forEach(a => {
+      if (a.id != null) m[a.id] = a.assetName ?? a.asset_name ?? `Asset #${a.id}`;
+    });
     return m;
   }, [notifAssets]);
 
-  const notifications = useMemo(() => buildNotifications(notifAssets, notifMaint, assetMap), [notifAssets, notifMaint, assetMap]);
+  // [UPD-2] full buildNotifications — same as Dashboard
+  const notifications = useMemo(() =>
+    buildNotifications(notifAssets, notifMaint, assetMap),
+  [notifAssets, notifMaint, assetMap]);
 
   if (user.role !== "Admin") return <AccessDenied />;
 
