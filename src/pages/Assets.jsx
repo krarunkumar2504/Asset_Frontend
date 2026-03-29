@@ -1,37 +1,17 @@
 // ─────────────────────────────────────────────────────────────
-// Assets.jsx — v4.0  All Fixes Applied
+// Assets.jsx — v4.1  Admin Sidebar Fix
 //
-// ═══════════════════════════════════════════════════════════
-// CHANGES IN THIS VERSION
-// ═══════════════════════════════════════════════════════════
+// CHANGES FROM v4.0:
+// 1. ADMIN SIDEBAR ITEMS — Create Employee, Manage Employees,
+//    Audit Logs now visible on Assets page for Admin role.
+//    Added ADMIN_NAV_ITEMS constant + admin section in
+//    SidebarContent. No more needing to visit Dashboard first.
 //
-// 1. MOBILE NOTIFICATION FIX
-//    - Dropdown now uses right:0/left:auto on small screens
-//    - No more half-hidden panel on the left
-//    - Width capped to screen width with mx-2 safe zone
-//
-// 2. VIEW SWITCHING FIX
-//    - Removed the auto-switch-to-card on resize/scroll
-//    - View only changes when user explicitly clicks Table/Cards
-//    - Default view is always "table"
-//
-// 3. TOAST NOTIFICATION SYSTEM
-//    - Beautiful animated toast for success / error / info
-//    - Appears top-right (desktop) / top-center (mobile)
-//    - Auto-dismisses after 4 s, manual ✕ close
-//    - Used for: add, update, delete, AI, network errors
-//
-// 4. DELETE / UPDATE NOW WORKING
-//    - api.delete and api.put read response body correctly
-//    - Shows server success message in toast
-//    - Error toast if backend returns non-2xx
-//
-// 5. SPRING BOOT COMPATIBILITY
-//    - Expects JSON body: { success, message, asset? }
-//    - Falls back gracefully if backend still returns plain string
-//
-// 6. ALL PREVIOUS FIXES RETAINED
-//    - Role-based dashboard title
+// ALL v4.0 FIXES RETAINED:
+//    - Mobile notification dropdown left-overflow fix
+//    - View switching only on explicit button click
+//    - Toast notification system
+//    - Delete / Update working with JSON response
 //    - Real asset names in notifications (assetMap)
 //    - Working pagination
 // ─────────────────────────────────────────────────────────────
@@ -47,7 +27,7 @@ import axios from "axios";
 const api = axios.create({
   baseURL: "https://assest-management-system.onrender.com/",
   headers: { "Content-Type": "application/json", Accept: "application/json" },
-  timeout: 30000,   // 30 s — Render.com free tier cold-starts can take 15-20 s
+  timeout: 30000,
 });
 
 const NAV_ITEMS = [
@@ -55,6 +35,13 @@ const NAV_ITEMS = [
   { label: "Assets",      icon: "📦", badge: null, path: "/assets"      },
   { label: "Maintenance", icon: "🔧", badge: null, path: "/maintenance" },
   { label: "Reports",     icon: "📊", badge: null, path: "/reports"     },
+];
+
+// ── Admin nav items (mirrors Dashboard.jsx) ──────────────────
+const ADMIN_NAV_ITEMS = [
+  { label: "Create Employee",  icon: "👤", path: "/create-employee"  },
+  { label: "Manage Employees", icon: "🏢", path: "/admin/employees"  },
+  { label: "Audit Logs",       icon: "📜", path: "/audit-logs"       },
 ];
 
 const EMPTY_FORM = {
@@ -100,7 +87,7 @@ function resolveNotifAssetName(record, assetMap) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// EXTRACT SERVER MESSAGE — works with JSON or plain-string backends
+// EXTRACT SERVER MESSAGE
 // ─────────────────────────────────────────────────────────────
 function extractServerMessage(data, fallback = "Operation completed.") {
   if (!data) return fallback;
@@ -159,7 +146,6 @@ function buildNotifications(assets, maintenance, assetMap = {}) {
 
 // ─────────────────────────────────────────────────────────────
 // TOAST SYSTEM
-// Beautiful animated toasts for success / error / info
 // ─────────────────────────────────────────────────────────────
 function Toast({ toasts, removeToast }) {
   const STYLES = {
@@ -265,10 +251,7 @@ function useToast() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// NOTIFICATION DROPDOWN — MOBILE FIX (v2)
-// Strategy: fixed width 300px, right-aligned to bell but clamped
-// so it never goes off the LEFT edge of the screen.
-// On very small phones (<340px) it stretches edge-to-edge with 8px margins.
+// NOTIFICATION DROPDOWN — Mobile left-overflow fix retained
 // ─────────────────────────────────────────────────────────────
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
   const TYPE_STYLE = {
@@ -278,18 +261,15 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
   };
 
   const screenW    = window.innerWidth;
-  const MARGIN     = 8;                                      // min gap from screen edge
-  const dropW      = Math.min(300, screenW - MARGIN * 2);   // never wider than screen
-
-  // Ideal: right edge of dropdown aligns with right edge of bell button
+  const MARGIN     = 8;
+  const dropW      = Math.min(300, screenW - MARGIN * 2);
   const bellRight  = anchorRect ? anchorRect.right : screenW - MARGIN;
-  // left = bellRight - dropW, but clamp so it never goes < MARGIN
   const computedLeft = Math.max(MARGIN, bellRight - dropW);
 
   const style = {
     position:     "fixed",
     top:          (anchorRect?.bottom ?? 60) + 8,
-    left:         computedLeft,          // ← use LEFT not RIGHT
+    left:         computedLeft,
     width:        dropW,
     zIndex:       9999,
     background:   "#fff",
@@ -373,13 +353,34 @@ function StatusBadge({ status }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// SIDEBAR CONTENT
+// SIDEBAR CONTENT — Admin section added
 // ─────────────────────────────────────────────────────────────
 function SidebarContent({ onNavigate }) {
   const navigate = useNavigate();
   const location = useLocation();
   const user     = getStoredUser();
+  const isAdmin  = user.role === "Admin";
   const handleNav = (path) => { navigate(path); if (onNavigate) onNavigate(); };
+
+  const NavBtn = ({ item }) => {
+    const isActive = location.pathname === item.path ||
+      (item.path !== "/dashboard" && location.pathname.startsWith(item.path));
+    return (
+      <button
+        key={item.label}
+        onClick={() => handleNav(item.path)}
+        className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative
+          ${isActive ? "text-white" : "text-indigo-300 hover:bg-white/5 hover:text-indigo-100"}`}
+        style={isActive ? { background: "linear-gradient(90deg,rgba(99,102,241,0.5),rgba(20,184,166,0.3))", boxShadow: "0 0 20px rgba(99,102,241,0.3)" } : {}}>
+        {isActive && (
+          <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full"
+            style={{ background: "linear-gradient(180deg,#818cf8,#34d399)" }} />
+        )}
+        <span className="text-sm w-4 text-center">{item.icon}</span>
+        <span className="flex-1">{item.label}</span>
+      </button>
+    );
+  };
 
   return (
     <div className="flex flex-col h-full py-6 px-3.5">
@@ -394,28 +395,26 @@ function SidebarContent({ onNavigate }) {
 
       <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mb-2">Main</p>
       <nav className="flex flex-col gap-1">
-        {NAV_ITEMS.map((item) => {
-          const isActive = location.pathname.startsWith(item.path);
-          return (
-            <button key={item.label} onClick={() => handleNav(item.path)}
-              className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative
-                ${isActive ? "text-white" : "text-indigo-300 hover:bg-white/5 hover:text-indigo-100"}`}
-              style={isActive ? { background: "linear-gradient(90deg,rgba(99,102,241,0.5),rgba(20,184,166,0.3))", boxShadow: "0 0 20px rgba(99,102,241,0.3)" } : {}}>
-              {isActive && (
-                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full"
-                  style={{ background: "linear-gradient(180deg,#818cf8,#34d399)" }} />
-              )}
-              <span className="text-sm w-4 text-center">{item.icon}</span>
-              <span className="flex-1">{item.label}</span>
-            </button>
-          );
-        })}
+        {NAV_ITEMS.map((item) => <NavBtn key={item.label} item={item} />)}
       </nav>
 
+      {/* Admin section — visible on Assets page for Admin role */}
+      {isAdmin && (
+        <>
+          <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mt-5 mb-2">Admin</p>
+          <nav className="flex flex-col gap-1">
+            {ADMIN_NAV_ITEMS.map((item) => <NavBtn key={item.label} item={item} />)}
+          </nav>
+        </>
+      )}
+
       <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
-        <p className="text-xs text-emerald-400 font-semibold tracking-wide uppercase">{user.role ?? "Administrator"}</p>
+        <p className="text-xs font-semibold tracking-wide uppercase"
+          style={{ color: isAdmin ? "#34d399" : "#a5b4fc" }}>
+          {user.role ?? "Administrator"}
+        </p>
         <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{getUserDisplayName(user)}</p>
-        <p className="text-xs text-indigo-600 mt-0.5">v4.0.0 — Pro Plan</p>
+        <p className="text-xs text-indigo-600 mt-0.5">v4.1.0 — Pro Plan</p>
       </div>
     </div>
   );
@@ -691,7 +690,7 @@ function FormField({ label, required, children }) {
 const inputCls = "px-3 py-2 border border-indigo-100 rounded-xl text-xs bg-white text-slate-700 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-50 transition-all w-full";
 
 // ─────────────────────────────────────────────────────────────
-// ADD / EDIT ASSET MODAL — with toast support passed in
+// ADD / EDIT ASSET MODAL
 // ─────────────────────────────────────────────────────────────
 function AssetModal({ editAsset, onClose, onSaved, toast }) {
   const isEdit = Boolean(editAsset);
@@ -963,8 +962,6 @@ function Assets({ toast }) {
   const [search,       setSearch]       = useState("");
   const [typeFilter,   setTypeFilter]   = useState("");
   const [statusFilter, setStatusFilter] = useState("");
-
-  // VIEW SWITCHING FIX: default is always "table", only changed by explicit button click
   const [view,         setView]         = useState("table");
   const [modalMode,    setModalMode]    = useState(null);
   const [editAsset,    setEditAsset]    = useState(null);
@@ -997,13 +994,10 @@ function Assets({ toast }) {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  // VIEW SWITCHING FIX: NO auto-switch on resize. View is purely user-controlled.
-
   const openAdd    = () => { setEditAsset(null); setModalMode("add");  };
   const openEdit   = (a) => { setEditAsset(a);   setModalMode("edit"); };
   const closeModal = () => { setModalMode(null); setEditAsset(null);   };
 
-  // DELETE FIX: reads JSON response body, shows toast
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
@@ -1113,8 +1107,6 @@ function Assets({ toast }) {
             {["Active","Maintenance","Inactive"].map((s) => <option key={s}>{s}</option>)}
           </select>
           <div className="flex-1 hidden sm:block" />
-
-          {/* VIEW SWITCHING FIX: only onClick changes view — no resize listener */}
           <div className="flex border border-indigo-100 rounded-xl overflow-hidden bg-white ml-auto sm:ml-0">
             {["table","card"].map((v) => (
               <button key={v} onClick={() => setView(v)}

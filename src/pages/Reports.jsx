@@ -1,33 +1,22 @@
 // ─────────────────────────────────────────────────────────────
-// Reports.jsx — Role Title Fix + Real Asset Names in Notifications
+// Reports.jsx — Fixed Version
 //
-// ═══════════════════════════════════════════════════════════
-// WHAT WAS CHANGED FROM PREVIOUS VERSION
-// ═══════════════════════════════════════════════════════════
+// FIXES APPLIED:
+// 1. ADMIN SIDEBAR ITEMS — Create Employee, Manage Employees, Audit Logs
+//    now visible immediately on Reports page without needing to
+//    navigate to Dashboard first. Added ADMIN_NAV_ITEMS constant
+//    and admin section in SidebarContent (mirrors Dashboard.jsx).
 //
-// 1. ROLE-BASED DASHBOARD TITLE  (search "// ROLE TITLE FIX")
-//    Problem: Navbar hardcoded "Admin Dashboard" for all users.
-//    Fix: getDashboardLabel(user) reads user.role from localStorage:
-//      - "Admin"    → "Admin Dashboard"
-//      - "Employee" → "Employee Dashboard"
-//      - any other  → "<Role> Dashboard"
-//      - no role    → "Dashboard"
+// 2. MOBILE NOTIFICATION DROPDOWN — no longer cut off on the left.
+//    Uses left-anchored positioning (same strategy as Assets.jsx v4):
+//    computedLeft = Math.max(MARGIN, bellRight - dropW)
+//    so it never overflows the screen edge on any phone.
 //
-// 2. REAL ASSET NAMES IN NOTIFICATIONS  (search "// ASSET NAME FIX - NOTIF")
-//    Problem: buildNotifications used `Asset #${r.assetId}` as a
-//    fallback for overdue records, showing meaningless IDs like
-//    "Asset #1" in the bell dropdown.
-//    Fix: buildNotifications now accepts assetMap (id → name) as
-//    a third argument. resolveNotifAssetName(record, assetMap) resolves:
-//      1. record.assetName   — if already present in the record
-//      2. assetMap[assetId]  — looked up from the fetched assets list
-//      3. "Asset #<id>"      — only absolute last resort
-//    The assetMap is passed from both Reports component and the root
-//    ReportsPage so the Navbar bell also gets real names on load.
+// 3. REAL ASSET NAMES IN NOTIFICATIONS — assetMap passed to
+//    buildNotifications so bell shows "Dell Laptop" not "Asset #1".
+//    (Logic was already written; wiring confirmed intact.)
 //
-// ALL OTHER LOGIC — UNCHANGED
-//   Asset name fix in topAssets table, real AI via Spring Boot,
-//   real notifications, download handlers — all intact.
+// ALL OTHER LOGIC UNCHANGED.
 // ─────────────────────────────────────────────────────────────
 
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
@@ -46,6 +35,13 @@ const NAV_ITEMS = [
   { label: "Assets",      icon: "📦", badge: null, path: "/assets"      },
   { label: "Maintenance", icon: "🔧", badge: null, path: "/maintenance" },
   { label: "Reports",     icon: "📊", badge: null, path: "/reports"     },
+];
+
+// ── FIX 1: Admin nav items (same as Dashboard.jsx) ──────────
+const ADMIN_NAV_ITEMS = [
+  { label: "Create Employee",  icon: "👤", path: "/create-employee"  },
+  { label: "Manage Employees", icon: "🏢", path: "/admin/employees"  },
+  { label: "Audit Logs",       icon: "📜", path: "/audit-logs"       },
 ];
 
 const BAR_GRADIENTS = [
@@ -96,39 +92,18 @@ function getUserInitials(user) {
   return getDisplayName(user).split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2) || "U";
 }
 
-// ─────────────────────────────────────────────────────────────
-// ROLE TITLE FIX — derives the navbar label from user.role
-//
-// Admin    → "Admin Dashboard"
-// Employee → "Employee Dashboard"
-// Manager  → "Manager Dashboard"
-// (none)   → "Dashboard"
-// ─────────────────────────────────────────────────────────────
 function getDashboardLabel(user) {
   const role = (user.role ?? "").trim();
   if (!role) return "Dashboard";
   return `${role} Dashboard`;
 }
 
-// ─────────────────────────────────────────────────────────────
-// ASSET NAME FIX — resolveAssetName (for topAssets table, etc.)
-// ─────────────────────────────────────────────────────────────
 function resolveAssetName(record, assetMap) {
   if (record.assetName && record.assetName.trim()) return record.assetName.trim();
   if (record.assetId   && assetMap[record.assetId]) return assetMap[record.assetId];
   return `Asset #${record.assetId ?? "?"}`;
 }
 
-// ─────────────────────────────────────────────────────────────
-// ASSET NAME FIX - NOTIF
-// resolveNotifAssetName — used inside buildNotifications so the
-// bell dropdown shows real names instead of "Asset #1".
-//
-// Priority:
-//   1. record.assetName   — if the backend already includes it
-//   2. assetMap[assetId]  — looked up from the full assets list
-//   3. "Asset #<id>"      — only as absolute last resort
-// ─────────────────────────────────────────────────────────────
 function resolveNotifAssetName(record, assetMap) {
   if (record.assetName && record.assetName.trim()) return record.assetName.trim();
   if (record.assetId   && assetMap[record.assetId]) return assetMap[record.assetId];
@@ -137,16 +112,10 @@ function resolveNotifAssetName(record, assetMap) {
 
 // ─────────────────────────────────────────────────────────────
 // NOTIFICATION BUILDER
-//
-// ASSET NAME FIX - NOTIF: now accepts assetMap as third argument.
-// Overdue records use resolveNotifAssetName(r, assetMap) instead
-// of the old fallback which showed "Asset #1" etc.
 // ─────────────────────────────────────────────────────────────
 function buildNotifications(assets, records, assetMap = {}) {
   const notes = [];
 
-  // Overdue maintenance records
-  // ASSET NAME FIX - NOTIF: real name via resolveNotifAssetName
   records
     .filter((r) => deriveStatus(r.nextDueDate) === "Overdue")
     .slice(0, 3)
@@ -156,13 +125,11 @@ function buildNotifications(assets, records, assetMap = {}) {
         type:    "critical",
         icon:    "🚨",
         title:   "Overdue Maintenance",
-        // ASSET NAME FIX - NOTIF: "Dell Laptop" not "Asset #1"
         message: `${resolveNotifAssetName(r, assetMap)} — due on ${r.nextDueDate ?? "unknown date"}`,
         time:    "Overdue",
       });
     });
 
-  // Assets currently under maintenance
   assets
     .filter((a) => (a.status ?? "").toLowerCase() === "maintenance")
     .slice(0, 2)
@@ -177,7 +144,6 @@ function buildNotifications(assets, records, assetMap = {}) {
       });
     });
 
-  // Pending tasks summary
   const pending = records.filter((r) => deriveStatus(r.nextDueDate) === "Pending");
   if (pending.length > 0) {
     notes.push({
@@ -190,7 +156,6 @@ function buildNotifications(assets, records, assetMap = {}) {
     });
   }
 
-  // Inactive assets
   const inactive = assets.filter((a) => (a.status ?? "").toLowerCase() === "inactive");
   if (inactive.length > 0) {
     notes.push({
@@ -216,7 +181,9 @@ function buildNotifications(assets, records, assetMap = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// NOTIFICATION DROPDOWN — React Portal
+// NOTIFICATION DROPDOWN
+// FIX 2: Mobile left-overflow fixed — mirrors Assets.jsx v4 strategy.
+// Uses left-anchored positioning clamped to screen margins.
 // ─────────────────────────────────────────────────────────────
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
   const TYPE_STYLE = {
@@ -225,11 +192,17 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
     info:     { iconBg: "bg-indigo-100", dot: "bg-indigo-400", title: "text-indigo-700" },
   };
 
+  const screenW    = window.innerWidth;
+  const MARGIN     = 8;
+  const dropW      = Math.min(300, screenW - MARGIN * 2);
+  const bellRight  = anchorRect ? anchorRect.right : screenW - MARGIN;
+  const computedLeft = Math.max(MARGIN, bellRight - dropW);
+
   const style = {
     position:     "fixed",
     top:          (anchorRect?.bottom ?? 60) + 8,
-    right:        anchorRect ? window.innerWidth - anchorRect.right : 16,
-    width:        320,
+    left:         computedLeft,
+    width:        dropW,
     zIndex:       9999,
     background:   "#fff",
     borderRadius: 16,
@@ -350,12 +323,34 @@ function downloadPDF(assets, maintenance, kpiCards) {
 
 // ─────────────────────────────────────────────────────────────
 // SIDEBAR CONTENT
+// FIX 1: Admin section now rendered in Reports page sidebar.
 // ─────────────────────────────────────────────────────────────
 function SidebarContent({ onNavigate }) {
   const navigate = useNavigate();
   const location = useLocation();
   const user     = getStoredUser();
+  const isAdmin  = user.role === "Admin";
   const handleNav = (path) => { navigate(path); if (onNavigate) onNavigate(); };
+
+  const NavBtn = ({ item }) => {
+    const isActive = location.pathname === item.path ||
+      (item.path !== "/dashboard" && location.pathname.startsWith(item.path));
+    return (
+      <button
+        onClick={() => handleNav(item.path)}
+        className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative
+          ${isActive ? "text-white" : "text-indigo-300 hover:bg-white/5 hover:text-indigo-100"}`}
+        style={isActive ? { background: "linear-gradient(90deg,rgba(99,102,241,.5),rgba(20,184,166,.3))", boxShadow: "0 0 20px rgba(99,102,241,.3)" } : {}}>
+        {isActive && (
+          <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full"
+            style={{ background: "linear-gradient(180deg,#818cf8,#34d399)" }} />
+        )}
+        <span className="text-sm w-4 text-center">{item.icon}</span>
+        <span className="flex-1">{item.label}</span>
+        {item.badge && <span className="text-xs bg-indigo-800 text-indigo-200 px-1.5 py-0.5 rounded-full">{item.badge}</span>}
+      </button>
+    );
+  };
 
   return (
     <div className="flex flex-col h-full py-6 px-3.5">
@@ -370,27 +365,24 @@ function SidebarContent({ onNavigate }) {
 
       <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mb-2">Main</p>
       <nav className="flex flex-col gap-1">
-        {NAV_ITEMS.map((item) => {
-          const isActive = location.pathname.startsWith(item.path);
-          return (
-            <button key={item.label} onClick={() => handleNav(item.path)}
-              className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative
-                ${isActive ? "text-white" : "text-indigo-300 hover:bg-white/5 hover:text-indigo-100"}`}
-              style={isActive ? { background: "linear-gradient(90deg,rgba(99,102,241,.5),rgba(20,184,166,.3))", boxShadow: "0 0 20px rgba(99,102,241,.3)" } : {}}>
-              {isActive && (
-                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full"
-                  style={{ background: "linear-gradient(180deg,#818cf8,#34d399)" }} />
-              )}
-              <span className="text-sm w-4 text-center">{item.icon}</span>
-              <span className="flex-1">{item.label}</span>
-              {item.badge && <span className="text-xs bg-indigo-800 text-indigo-200 px-1.5 py-0.5 rounded-full">{item.badge}</span>}
-            </button>
-          );
-        })}
+        {NAV_ITEMS.map((item) => <NavBtn key={item.label} item={item} />)}
       </nav>
 
+      {/* FIX 1: Admin section — visible on Reports page for Admin role */}
+      {isAdmin && (
+        <>
+          <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mt-5 mb-2">Admin</p>
+          <nav className="flex flex-col gap-1">
+            {ADMIN_NAV_ITEMS.map((item) => <NavBtn key={item.label} item={item} />)}
+          </nav>
+        </>
+      )}
+
       <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
-        <p className="text-xs text-emerald-400 font-semibold tracking-wide uppercase">{user.role ?? "Administrator"}</p>
+        <p className="text-xs font-semibold tracking-wide uppercase"
+          style={{ color: isAdmin ? "#34d399" : "#a5b4fc" }}>
+          {user.role ?? "Administrator"}
+        </p>
         <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{getDisplayName(user)}</p>
         <p className="text-xs text-indigo-600 mt-0.5">v3.1.0 — Pro Plan</p>
       </div>
@@ -422,10 +414,6 @@ function Sidebar({ mobileOpen, onClose }) {
 
 // ─────────────────────────────────────────────────────────────
 // NAVBAR
-//
-// ROLE TITLE FIX:
-//   Before: hardcoded "Admin Dashboard" for every user
-//   After:  getDashboardLabel(user) → e.g. "Employee Dashboard / Reports"
 // ─────────────────────────────────────────────────────────────
 function Navbar({ onMenuToggle, notifications }) {
   const navigate    = useNavigate();
@@ -437,10 +425,7 @@ function Navbar({ onMenuToggle, notifications }) {
 
   const TITLES    = { "/dashboard": "Dashboard", "/assets": "Assets", "/maintenance": "Maintenance", "/reports": "Reports" };
   const pageTitle = TITLES[location.pathname] ?? "Reports";
-
-  // ROLE TITLE FIX: dynamic label instead of hardcoded "Admin Dashboard"
   const dashboardLabel = getDashboardLabel(user);
-
   const initials    = getUserInitials(user);
   const displayName = getDisplayName(user);
 
@@ -466,11 +451,6 @@ function Navbar({ onMenuToggle, notifications }) {
       </button>
 
       <div className="flex-1 min-w-0">
-        {/*
-          ROLE TITLE FIX:
-          Desktop → "Employee Dashboard / Reports"  or  "Admin Dashboard / Reports"
-          Mobile  → "Reports" (space-efficient, unchanged)
-        */}
         <span className="text-sm font-bold text-indigo-950 hidden sm:inline">{dashboardLabel}</span>
         <span className="text-xs text-indigo-300 hidden sm:inline"> / {pageTitle}</span>
         <span className="text-sm font-bold text-indigo-950 sm:hidden">{pageTitle}</span>
@@ -631,7 +611,7 @@ function TableRow({ row, isEven }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// AI INSIGHTS PANEL — calls Spring Boot backend
+// AI INSIGHTS PANEL
 // ─────────────────────────────────────────────────────────────
 function ReportsAiPanel({ assets, maintenance, topAssets, underperforming, assetTypeCounts, costTrend, kpiCards }) {
   const [aiText,      setAiText]      = useState("");
@@ -674,14 +654,11 @@ function ReportsAiPanel({ assets, maintenance, topAssets, underperforming, asset
       usefulLifeYears: Number(subjectAsset?.usefulLifeYears) || 5,
       maintenanceCost: subjectCost,
     };
-    console.log("=== Reports AI: payload →", payload);
     try {
       const response = await api.post("/api/ai/recommendation", payload);
       const text = typeof response.data === "string" ? response.data : response.data?.recommendation ?? response.data?.result ?? response.data?.message ?? JSON.stringify(response.data);
-      console.log("=== Reports AI: response →", text);
       setAiText(text); runTypewriter(text);
     } catch (err) {
-      console.error("Reports AI error:", err);
       if      (err.code === "ERR_NETWORK")       setAiError("Cannot reach backend — is Spring Boot running on port 8080?");
       else if (err.response?.status === 404)     setAiError("Endpoint not found — check /api/ai/recommendation in your backend.");
       else setAiError(err.response?.data?.message ?? err.message ?? "Request failed. Check console.");
@@ -782,7 +759,6 @@ function Reports() {
   const [csvLoading,  setCsvLoading]  = useState(false);
   const [pdfLoading,  setPdfLoading]  = useState(false);
 
-  // ASSET NAME FIX: assetMap for resolving names in topAssets table
   const assetMap = useMemo(() => {
     const map = {};
     assets.forEach((a) => { if (a.id != null) map[a.id] = a.assetName ?? a.name ?? `Asset #${a.id}`; });
@@ -854,7 +830,7 @@ function Reports() {
 
   const underperforming = useMemo(() => topAssets.filter((a) => a.ratioPct >= 40).slice(0, 4), [topAssets]);
 
-  // ASSET NAME FIX - NOTIF: pass assetMap so bell shows real names
+  // FIX 3: assetMap passed to buildNotifications → real names in bell
   const notifications = useMemo(
     () => buildNotifications(assets, maintenance, assetMap),
     [assets, maintenance, assetMap]
@@ -993,14 +969,12 @@ export default function ReportsPage() {
       .catch(() => {});
   }, []);
 
-  // ASSET NAME FIX - NOTIF: assetMap at root level for Navbar bell
   const assetMap = useMemo(() => {
     const map = {};
     assets.forEach((a) => { if (a.id != null) map[a.id] = a.assetName ?? a.name ?? `Asset #${a.id}`; });
     return map;
   }, [assets]);
 
-  // ASSET NAME FIX - NOTIF: pass assetMap so bell shows real names immediately
   const notifications = useMemo(
     () => buildNotifications(assets, records, assetMap),
     [assets, records, assetMap]
