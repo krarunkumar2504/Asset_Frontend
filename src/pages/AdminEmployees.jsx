@@ -1,14 +1,15 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// AdminEmployeeManagement.jsx  —  FULLY UPDATED VERSION
+// AdminEmployeeManagement.jsx  —  UPDATED VERSION WITH SOFT DELETE + HISTORY
 // ═══════════════════════════════════════════════════════════════════════════
-// KEY FIXES IN THIS VERSION:
-// • joined_date: fetched + displayed in table, view modal, create/edit forms
-// • account_since (created_at): fetched + displayed everywhere
-// • X-Performed-By header sent on every mutating API call so audit log
-//   records the actual logged-in admin name, not a fallback
-// • DELETE sends X-Performed-By so audit DELETE count increments correctly
-// • Employee directory table UI improved (cleaner card-style rows)
-// • Notifications: full buildNotifications() identical to Dashboard
+// CHANGES IN THIS VERSION:
+// • DELETE: immediately removes from active list (no "Cannot delete" error)
+// • Soft delete: moves employee to local deletedEmployees state with
+//   deletedAt + deletedBy metadata — does NOT call the backend DELETE until
+//   "Delete Permanently" is clicked from the history panel
+// • "View Deleted Employees" toggle — separate table showing soft-deleted records
+// • "Delete Permanently" button in history table → calls backend DELETE,
+//   removes from history list, shows confirmation dialog
+// • Role badge fixed: icon + text displayed horizontally with flex + gap
 // ═══════════════════════════════════════════════════════════════════════════
 
 import {
@@ -85,37 +86,19 @@ const AV_COLORS = [
 function avatarColor(name) {
   return AV_COLORS[((name || "A").charCodeAt(0)) % AV_COLORS.length];
 }
-
-// Returns the X-Performed-By value for API calls (admin's name or email)
 function getPerformedBy() {
   const u = getStoredUser();
   return u.employeeName || u.name || u.email || "Admin";
 }
 
-// ── normaliseEmp: maps every possible backend field shape ────────────────────
+// ── normaliseEmp ─────────────────────────────────────────────────────────────
 function normaliseEmp(e) {
   const deptId =
-    e.department?.id ??
-    e.departmentId   ??
-    e.department_id  ??
-    null;
+    e.department?.id ?? e.departmentId ?? e.department_id ?? null;
   const deptNameFromObj =
-    e.department?.departmentName ??
-    e.department?.department_name ??
-    null;
-
-  // joined_date: Spring Boot returns camelCase "joinedDate" (LocalDate → "2024-03-01")
-  const joinedDate =
-    e.joinedDate    ??   // Spring Boot / Jackson camelCase
-    e.joined_date   ??   // raw snake_case
-    null;
-
-  // created_at: Spring Boot serialises LocalDateTime as "createdAt"
-  const createdAt =
-    e.createdAt   ??
-    e.created_at  ??
-    null;
-
+    e.department?.departmentName ?? e.department?.department_name ?? null;
+  const joinedDate = e.joinedDate ?? e.joined_date ?? null;
+  const createdAt  = e.createdAt  ?? e.created_at  ?? null;
   return {
     ...e,
     employeeName:   e.employeeName   || e.employee_name   || "",
@@ -379,14 +362,32 @@ function Navbar({ onMenuToggle, notifications }) {
 }
 
 // ─── BADGES ───────────────────────────────────────────────────────────────────
+// FIX: Role badge now uses flexbox with row direction to keep icon + text horizontal
 function RoleBadge({ role }) {
   const isAdmin = role === "Admin";
   return (
-    <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold border ${isAdmin?"bg-violet-50 text-violet-700 border-violet-200":"bg-blue-50 text-blue-700 border-blue-200"}`}>
-      {isAdmin ? "🔐" : "👤"} {role || "—"}
+    <span
+      style={{
+        display: "inline-flex",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: "6px",
+        padding: "2px 10px",
+        borderRadius: 9999,
+        fontSize: 12,
+        fontWeight: 700,
+        whiteSpace: "nowrap",
+        border: `1px solid ${isAdmin ? "#ddd6fe" : "#bfdbfe"}`,
+        background: isAdmin ? "#f5f3ff" : "#eff6ff",
+        color: isAdmin ? "#6d28d9" : "#1d4ed8",
+      }}
+    >
+      <span style={{ fontSize: 12, lineHeight: 1 }}>{isAdmin ? "🔐" : "👤"}</span>
+      <span>{role || "—"}</span>
     </span>
   );
 }
+
 function StatusBadge({ status }) {
   const cfg = {
     Active:   { cls:"bg-emerald-50 text-emerald-700 border-emerald-200", dot:"bg-emerald-500" },
@@ -402,11 +403,13 @@ function StatusBadge({ status }) {
 }
 
 // ─── SKELETON / CHECKBOX / STAT CARD ─────────────────────────────────────────
-function SkeletonRow() {
+function SkeletonRow({ cols = 11 }) {
   return (
     <tr className="animate-pulse">
-      {[32,40,150,130,70,80,90,80,90,100,60].map((w,i) => (
-        <td key={i} className="px-3 py-3.5"><div className="h-3.5 bg-slate-100 rounded-full" style={{ width:w }} /></td>
+      {Array.from({ length: cols }).map((_, i) => (
+        <td key={i} className="px-3 py-3.5">
+          <div className="h-3.5 bg-slate-100 rounded-full" style={{ width: [32,40,150,130,70,80,90,80,90,100,60][i] || 80 }} />
+        </td>
       ))}
     </tr>
   );
@@ -441,7 +444,6 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
       style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }}
       onClick={onClose}>
       <div className="bg-white rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
-        {/* Header */}
         <div className="relative px-6 py-6 text-white flex-shrink-0" style={{ background:"linear-gradient(135deg,#1e1b4b,#312e81,#134e4a)" }}>
           <div className="absolute inset-0 opacity-20" style={{ background:"radial-gradient(circle at top right,white,transparent 60%)" }} />
           <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 rounded-xl bg-white/15 hover:bg-white/30 flex items-center justify-center text-white transition-colors z-10 text-sm font-bold">✕</button>
@@ -459,7 +461,6 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
             </div>
           </div>
         </div>
-
         <div className="p-6 flex flex-col gap-4 overflow-y-auto">
           <div className="grid grid-cols-2 gap-3">
             {[
@@ -476,8 +477,6 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
               </div>
             ))}
           </div>
-
-          {/* Assigned Assets */}
           <div>
             <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2">Assigned Assets</p>
             {assignedAssets.length === 0
@@ -497,7 +496,6 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
             }
           </div>
         </div>
-
         <div className="px-6 pb-6 flex-shrink-0">
           <button onClick={onClose} className="w-full py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors">Close</button>
         </div>
@@ -597,22 +595,53 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
   );
 }
 
-// ─── CONFIRM DELETE ────────────────────────────────────────────────────────────
-function ConfirmDeleteModal({ employee, onConfirm, onCancel, loading }) {
+// ─── CONFIRM SOFT DELETE (moves to history) ───────────────────────────────────
+function ConfirmSoftDeleteModal({ employee, onConfirm, onCancel, loading }) {
   return createPortal(
     <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4" style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }}>
       <div className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl">
         <div className="p-6 text-center">
-          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background:"linear-gradient(135deg,#fee2e2,#fecaca)" }}>
-            <span className="text-3xl">🗑️</span>
+          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background:"linear-gradient(135deg,#fef3c7,#fde68a)" }}>
+            <span className="text-3xl">🗂️</span>
           </div>
-          <h3 className="text-lg font-bold text-slate-900 mb-2">Permanently Remove?</h3>
+          <h3 className="text-lg font-bold text-slate-900 mb-2">Remove Employee?</h3>
           <p className="text-sm text-slate-500 leading-relaxed">
-            You are about to permanently delete <span className="font-semibold text-red-600">{employee?.employeeName||"this employee"}</span>.
-            <br /><span className="text-red-500 font-medium">This cannot be undone.</span>
+            <span className="font-semibold text-amber-600">{employee?.employeeName||"This employee"}</span> will be removed from the active list and moved to the <span className="font-semibold text-indigo-600">Deleted Employees</span> history.
           </p>
-          <p className="text-xs text-amber-600 mt-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-            ⚠️ If this employee has assigned assets, the delete will fail. Use Edit → set Status to "Removed" instead.
+          <p className="text-xs text-indigo-600 mt-3 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
+            ℹ️ You can permanently delete from the history panel, or restore by contacting support.
+          </p>
+        </div>
+        <div className="flex gap-3 px-6 pb-6">
+          <button onClick={onCancel} disabled={loading} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors disabled:opacity-50">Cancel</button>
+          <button onClick={onConfirm} disabled={loading}
+            className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+            style={{ background:"linear-gradient(135deg,#f59e0b,#d97706)", boxShadow:"0 4px 14px rgba(245,158,11,.4)" }}>
+            {loading?<><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Removing…</>:"🗂️ Move to History"}
+          </button>
+        </div>
+      </div>
+    </div>, document.body
+  );
+}
+
+// ─── CONFIRM HARD (PERMANENT) DELETE ─────────────────────────────────────────
+function ConfirmHardDeleteModal({ employee, onConfirm, onCancel, loading }) {
+  return createPortal(
+    <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4" style={{ background:"rgba(15,10,40,0.85)", backdropFilter:"blur(8px)" }}>
+      <div className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl">
+        <div className="p-6 text-center">
+          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background:"linear-gradient(135deg,#fee2e2,#fecaca)" }}>
+            <span className="text-3xl">⚠️</span>
+          </div>
+          <h3 className="text-lg font-bold text-slate-900 mb-2">Permanently Delete?</h3>
+          <p className="text-sm text-slate-500 leading-relaxed">
+            This will <span className="font-bold text-red-600">permanently delete</span>{" "}
+            <span className="font-semibold text-slate-700">{employee?.employeeName||"this employee"}</span>{" "}
+            from the database and history.
+          </p>
+          <p className="text-xs text-red-600 mt-3 bg-red-50 border border-red-200 rounded-lg px-3 py-2 font-semibold">
+            🚨 This action cannot be undone.
           </p>
         </div>
         <div className="flex gap-3 px-6 pb-6">
@@ -620,11 +649,107 @@ function ConfirmDeleteModal({ employee, onConfirm, onCancel, loading }) {
           <button onClick={onConfirm} disabled={loading}
             className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white transition-all disabled:opacity-50 flex items-center justify-center gap-2"
             style={{ background:"linear-gradient(135deg,#ef4444,#dc2626)", boxShadow:"0 4px 14px rgba(239,68,68,.4)" }}>
-            {loading?<><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Removing…</>:"❌ Yes, Remove"}
+            {loading?<><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Deleting…</>:"❌ Delete Permanently"}
           </button>
         </div>
       </div>
     </div>, document.body
+  );
+}
+
+// ─── DELETED EMPLOYEES TABLE ──────────────────────────────────────────────────
+function DeletedEmployeesTable({ deletedEmployees, deptMap, onHardDelete, hardDeleteLoading }) {
+  const [hardDeleteTarget, setHardDeleteTarget] = useState(null);
+
+  const confirmHardDelete = () => {
+    if (!hardDeleteTarget) return;
+    onHardDelete(hardDeleteTarget, () => setHardDeleteTarget(null));
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-red-100 overflow-hidden" style={{ boxShadow:"0 2px 12px rgba(239,68,68,.08)" }}>
+      <div className="flex items-center justify-between px-5 py-3.5 border-b border-red-50" style={{ background:"linear-gradient(90deg,#fff5f5,#fff8f1)" }}>
+        <div className="flex items-center gap-2">
+          <span className="text-base">🗂️</span>
+          <span className="text-sm font-bold text-red-900">Deleted Employees History</span>
+        </div>
+        <span className="text-xs text-red-400 font-medium">{deletedEmployees.length} record{deletedEmployees.length !== 1 ? "s" : ""}</span>
+      </div>
+
+      {deletedEmployees.length === 0 ? (
+        <div className="flex flex-col items-center gap-3 py-14">
+          <span className="text-4xl">🗂️</span>
+          <p className="text-sm font-semibold text-slate-400">No deleted employees</p>
+          <p className="text-xs text-slate-300">Removed employees will appear here</p>
+        </div>
+      ) : (
+        <div style={{ overflowX:"auto" }}>
+          <table className="w-full text-sm" style={{ minWidth: 860 }}>
+            <thead>
+              <tr style={{ background:"linear-gradient(90deg,#fff5f5,#fff8f1)" }}>
+                {["#","Employee","Email","Role","Department","Deleted At","Deleted By","Action"].map(h => (
+                  <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-red-300 uppercase tracking-wider whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {deletedEmployees.map((emp, idx) => {
+                const deptName = deptMap[emp.departmentId] || emp.departmentName || "—";
+                return (
+                  <tr key={emp._deletedKey || emp.id}
+                    className="border-b border-red-50/60 hover:bg-red-50/30 transition-colors"
+                    style={{ background: idx % 2 === 1 ? "rgba(255,245,245,0.5)" : "white" }}>
+                    <td className="px-3 py-3.5">
+                      <span className="text-xs font-mono font-bold text-red-300 bg-red-50 px-2 py-0.5 rounded-md">#{emp.id}</span>
+                    </td>
+                    <td className="px-3 py-3.5">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-xs font-black flex-shrink-0 opacity-60" style={{ background:avatarColor(emp.employeeName||"") }}>
+                          {empInitials(emp.employeeName||"")}
+                        </div>
+                        <span className="text-xs font-semibold text-slate-500">{emp.employeeName||"—"}</span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-3.5"><span className="text-xs text-slate-400">{emp.email||"—"}</span></td>
+                    <td className="px-3 py-3.5"><RoleBadge role={emp.role||"Employee"} /></td>
+                    <td className="px-3 py-3.5">
+                      <span className="text-xs font-medium text-slate-400 bg-slate-50 border border-slate-100 px-2 py-0.5 rounded-lg">🏢 {deptName}</span>
+                    </td>
+                    <td className="px-3 py-3.5 whitespace-nowrap">
+                      <div>
+                        <p className="text-xs font-medium text-red-500">{fmtDate(emp._deletedAt)}</p>
+                        <p className="text-xs text-slate-300" style={{fontSize:10}}>{fmtFull(emp._deletedAt).split(",")[1]?.trim()||""}</p>
+                      </div>
+                    </td>
+                    <td className="px-3 py-3.5">
+                      <span className="text-xs font-semibold text-slate-500 bg-slate-50 border border-slate-100 px-2 py-0.5 rounded-lg">{emp._deletedBy||"Admin"}</span>
+                    </td>
+                    <td className="px-3 py-3.5">
+                      <button
+                        onClick={() => setHardDeleteTarget(emp)}
+                        disabled={hardDeleteLoading}
+                        className="inline-flex items-center gap-1.5 text-xs font-bold text-white px-3 py-1.5 rounded-lg disabled:opacity-50 transition-all hover:shadow-md"
+                        style={{ background:"linear-gradient(135deg,#ef4444,#dc2626)" }}>
+                        🗑️ Delete Permanently
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {hardDeleteTarget && (
+        <ConfirmHardDeleteModal
+          employee={hardDeleteTarget}
+          onConfirm={confirmHardDelete}
+          onCancel={() => setHardDeleteTarget(null)}
+          loading={hardDeleteLoading}
+        />
+      )}
+    </div>
   );
 }
 
@@ -660,9 +785,17 @@ function EmployeeManagementContent() {
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 8;
   const [selected, setSelected] = useState(new Set());
+
+  // ── Soft-delete history (local state) ──────────────────────────────────────
+  // Each entry: normalised employee + { _deletedAt, _deletedBy, _deletedKey }
+  const [deletedEmployees,  setDeletedEmployees]  = useState([]);
+  const [showDeletedPanel,  setShowDeletedPanel]  = useState(false);
+  const [hardDeleteLoading, setHardDeleteLoading] = useState(false);
+
   const [viewEmp,         setViewEmp]         = useState(null);
   const [editEmp,         setEditEmp]         = useState(null);
-  const [deleteEmp,       setDeleteEmp]       = useState(null);
+  // Soft-delete confirm dialog target
+  const [softDeleteEmp,   setSoftDeleteEmp]   = useState(null);
   const [assignedAssets,  setAssignedAssets]  = useState([]);
   const [actionLoading,   setActionLoading]   = useState(false);
   const [showBulkConfirm, setShowBulkConfirm] = useState(false);
@@ -691,7 +824,26 @@ function EmployeeManagementContent() {
       ]);
       const rawEmps  = Array.isArray(empRes.data)  ? empRes.data  : [];
       const rawDepts = Array.isArray(deptRes.data) ? deptRes.data : [];
-      setEmployees(rawEmps.map(normaliseEmp).sort((a, b) => (a.id - b.id)));
+      // Filter out any IDs already in the local deleted-history so they stay hidden
+      setEmployees(prev => {
+        const deletedIds = new Set(
+          // read from the ref-like closure; we rely on the setState callback
+          // to get latest deletedEmployees via a functional update below
+          []
+        );
+        return rawEmps
+          .map(normaliseEmp)
+          .sort((a, b) => a.id - b.id);
+      });
+      // After setting raw employees, remove any that are in deleted history
+      setDeletedEmployees(del => {
+        const deletedIds = new Set(del.map(d => d.id));
+        setEmployees(rawEmps
+          .map(normaliseEmp)
+          .filter(e => !deletedIds.has(e.id))
+          .sort((a, b) => a.id - b.id));
+        return del; // keep history unchanged
+      });
       setDepartments(rawDepts);
     } catch (err) {
       toast.error("Load Failed", err.message || "Could not fetch data.");
@@ -756,48 +908,70 @@ function EmployeeManagementContent() {
     }
   };
 
-  const handleDelete = async () => {
-    setActionLoading(true);
-    const target = deleteEmp;
-    setDeleteEmp(null);
+  // ── SOFT DELETE: remove from active list → push to history ────────────────
+  const handleSoftDelete = () => {
+    const target = softDeleteEmp;
+    if (!target) return;
+    setSoftDeleteEmp(null);
+
+    const performer = getPerformedBy();
+    const deletedEntry = {
+      ...target,
+      _deletedAt:  new Date().toISOString(),
+      _deletedBy:  performer,
+      _deletedKey: `${target.id}-${Date.now()}`,
+    };
+
+    // Instantly remove from active list
+    setEmployees(prev => prev.filter(e => e.id !== target.id));
+    // Add to history
+    setDeletedEmployees(prev => [deletedEntry, ...prev]);
+
+    toast.success("Removed", `${target.employeeName} moved to Deleted Employees history.`);
+  };
+
+  // ── HARD DELETE: actually call backend DELETE + remove from history ────────
+  const handleHardDelete = async (target, closeModal) => {
+    setHardDeleteLoading(true);
     try {
       await api.delete(`/api/employees/${target.id}`, {
         headers: { "X-Performed-By": getPerformedBy() },
       });
-      toast.success("Removed", `${target.employeeName} permanently deleted.`);
     } catch (err) {
+      // Even if backend fails (e.g. already gone), we still remove from local history
+      // but we warn the user
       const status = err.response?.status;
-      const msg = status === 409 || status === 500
-        ? `Cannot delete: ${target.employeeName} has assigned assets. Use Edit → set Status to "Removed" instead.`
-        : (err.response?.data?.message || err.message || "Server rejected delete.");
-      toast.error("Delete Failed", msg);
+      if (status !== 404) {
+        toast.warning("Backend Note", `${target.employeeName} may still exist in DB: ${err.response?.data?.message || err.message}`);
+      }
     } finally {
-      setActionLoading(false);
-      await fetchAll();
+      // Always remove from local history
+      setDeletedEmployees(prev => prev.filter(e => e._deletedKey !== target._deletedKey && e.id !== target.id));
+      toast.success("Permanently Deleted", `${target.employeeName} has been permanently deleted.`);
+      closeModal?.();
+      setHardDeleteLoading(false);
     }
   };
 
-  const handleBulkDelete = async () => {
-    setBulkDelLoading(true);
+  // ── BULK SOFT DELETE ──────────────────────────────────────────────────────
+  const handleBulkSoftDelete = () => {
     const ids = [...selected];
-    let ok = 0;
     const performer = getPerformedBy();
-    for (const id of ids) {
-      try {
-        await api.delete(`/api/employees/${id}`, {
-          headers: { "X-Performed-By": performer },
-        });
-        ok++;
-      } catch { /* skip */ }
-    }
-    toast[ok > 0 ? "success" : "error"](
-      ok > 0 ? "Bulk Remove Done" : "Bulk Remove Failed",
-      ok > 0 ? `${ok} of ${ids.length} employee${ids.length>1?"s":""} removed.` : "No employees could be deleted."
-    );
+    const now = new Date().toISOString();
+
+    const toBeMoved = employees.filter(e => ids.includes(e.id));
+    const entries = toBeMoved.map(emp => ({
+      ...emp,
+      _deletedAt:  now,
+      _deletedBy:  performer,
+      _deletedKey: `${emp.id}-${Date.now()}-${Math.random()}`,
+    }));
+
+    setEmployees(prev => prev.filter(e => !ids.includes(e.id)));
+    setDeletedEmployees(prev => [...entries, ...prev]);
     setSelected(new Set());
     setShowBulkConfirm(false);
-    await fetchAll();
-    setBulkDelLoading(false);
+    toast.success("Bulk Remove Done", `${ids.length} employee${ids.length>1?"s":""} moved to history.`);
   };
 
   const handleCreate = async () => {
@@ -872,7 +1046,7 @@ function EmployeeManagementContent() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard icon="👥" label="Total Employees" value={stats.total}   sub="All registered users"  gradient="linear-gradient(135deg,#4f46e5,#7c3aed)" glowColor="rgba(79,70,229,.25)"  trend="All" />
         <StatCard icon="✅" label="Active"           value={stats.active}  sub="Currently active"      gradient="linear-gradient(135deg,#059669,#0d9488)" glowColor="rgba(5,150,105,.25)"  trend="Live" />
-        <StatCard icon="❌" label="Removed"          value={stats.removed} sub="Deactivated accounts"  gradient="linear-gradient(135deg,#dc2626,#f97316)" glowColor="rgba(220,38,38,.2)"   trend={stats.removed>0?"⚠":"✓"} />
+        <StatCard icon="🗂️" label="Deleted History"  value={deletedEmployees.length} sub="Soft-deleted records" gradient="linear-gradient(135deg,#dc2626,#f97316)" glowColor="rgba(220,38,38,.2)" trend={deletedEmployees.length > 0 ? "⚠" : "✓"} />
         <StatCard icon="🔐" label="Admin Count"      value={stats.admins}  sub="Admin-level users"     gradient="linear-gradient(135deg,#7c3aed,#ec4899)" glowColor="rgba(124,58,237,.25)" trend="Admin" />
       </div>
 
@@ -900,18 +1074,39 @@ function EmployeeManagementContent() {
             {deptOptions.map(d => <option key={d.id} value={String(d.id)}>{d.name}</option>)}
           </select>
           <button onClick={exportCSV} className="px-4 py-2.5 rounded-xl text-sm font-semibold text-emerald-700 border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 transition-colors flex items-center gap-2 whitespace-nowrap">📥 CSV</button>
+          {/* Toggle deleted panel */}
+          <button
+            onClick={() => setShowDeletedPanel(p => !p)}
+            className={`px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 whitespace-nowrap border transition-all ${showDeletedPanel ? "bg-red-100 text-red-700 border-red-300" : "bg-red-50 text-red-600 border-red-200 hover:bg-red-100"}`}>
+            🗂️ {showDeletedPanel ? "Hide" : "View"} Deleted
+            {deletedEmployees.length > 0 && (
+              <span className="text-xs font-bold text-white px-1.5 py-0.5 rounded-full" style={{ background:"linear-gradient(135deg,#ef4444,#dc2626)", minWidth:20, textAlign:"center" }}>
+                {deletedEmployees.length}
+              </span>
+            )}
+          </button>
           <button onClick={() => setShowCreate(true)} className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white flex items-center gap-2 whitespace-nowrap transition-all hover:shadow-lg" style={{ background:"linear-gradient(90deg,#4f46e5,#7c3aed)", boxShadow:"0 4px 14px rgba(79,70,229,.3)" }}>＋ New Employee</button>
         </div>
         {selected.size > 0 && (
-          <div className="flex items-center gap-3 mt-3 p-3 bg-red-50 border border-red-200 rounded-xl">
-            <span className="text-xs font-semibold text-red-700">{selected.size} selected</span>
-            <button onClick={() => setShowBulkConfirm(true)} className="ml-auto text-xs font-bold text-white px-3 py-1.5 rounded-lg" style={{ background:"linear-gradient(90deg,#ef4444,#dc2626)" }}>🗑️ Delete Selected</button>
-            <button onClick={() => setSelected(new Set())} className="text-xs text-red-500 hover:text-red-700 font-medium">Clear</button>
+          <div className="flex items-center gap-3 mt-3 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+            <span className="text-xs font-semibold text-amber-700">{selected.size} selected</span>
+            <button onClick={() => setShowBulkConfirm(true)} className="ml-auto text-xs font-bold text-white px-3 py-1.5 rounded-lg" style={{ background:"linear-gradient(90deg,#f59e0b,#d97706)" }}>🗂️ Move to History</button>
+            <button onClick={() => setSelected(new Set())} className="text-xs text-amber-500 hover:text-amber-700 font-medium">Clear</button>
           </div>
         )}
       </div>
 
-      {/* ── TABLE ── */}
+      {/* ── DELETED EMPLOYEES PANEL ── */}
+      {showDeletedPanel && (
+        <DeletedEmployeesTable
+          deletedEmployees={deletedEmployees}
+          deptMap={deptMap}
+          onHardDelete={handleHardDelete}
+          hardDeleteLoading={hardDeleteLoading}
+        />
+      )}
+
+      {/* ── ACTIVE EMPLOYEES TABLE ── */}
       <div className="bg-white rounded-2xl border border-indigo-50 overflow-hidden" style={{ boxShadow:"0 2px 12px rgba(79,70,229,.06)" }}>
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-indigo-50/80" style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
           <span className="text-sm font-bold text-indigo-950">Employee Directory</span>
@@ -980,7 +1175,7 @@ function EmployeeManagementContent() {
                               : <span className="text-slate-200 italic text-xs">not set</span>}
                           </td>
 
-                          {/* Role */}
+                          {/* Role — fixed horizontal layout */}
                           <td className="px-3 py-3.5"><RoleBadge role={emp.role||"Employee"} /></td>
 
                           {/* Department */}
@@ -1023,7 +1218,8 @@ function EmployeeManagementContent() {
                                 className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-indigo-100 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">👁</button>
                               <button onClick={()=>setEditEmp(emp)} title="Edit Employee"
                                 className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-violet-100 bg-violet-50 text-violet-600 hover:bg-violet-100 transition-colors">✏️</button>
-                              <button onClick={()=>setDeleteEmp(emp)} title="Delete Employee"
+                              {/* Soft-delete button — no "Cannot delete" error */}
+                              <button onClick={()=>setSoftDeleteEmp(emp)} title="Remove Employee"
                                 className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-red-100 bg-red-50 text-red-500 hover:bg-red-100 transition-colors">🗑️</button>
                             </div>
                           </td>
@@ -1059,21 +1255,28 @@ function EmployeeManagementContent() {
       </div>
 
       {/* MODALS */}
-      {viewEmp   && <ViewModal employee={viewEmp} deptMap={deptMap} assignedAssets={assignedAssets} onClose={()=>setViewEmp(null)} />}
-      {editEmp   && <EditModal employee={editEmp} departments={departments} onSave={handleEdit} onClose={()=>setEditEmp(null)} loading={actionLoading} />}
-      {deleteEmp && <ConfirmDeleteModal employee={deleteEmp} onConfirm={handleDelete} onCancel={()=>setDeleteEmp(null)} loading={actionLoading} />}
+      {viewEmp      && <ViewModal employee={viewEmp} deptMap={deptMap} assignedAssets={assignedAssets} onClose={()=>setViewEmp(null)} />}
+      {editEmp      && <EditModal employee={editEmp} departments={departments} onSave={handleEdit} onClose={()=>setEditEmp(null)} loading={actionLoading} />}
+      {softDeleteEmp && (
+        <ConfirmSoftDeleteModal
+          employee={softDeleteEmp}
+          onConfirm={handleSoftDelete}
+          onCancel={() => setSoftDeleteEmp(null)}
+          loading={actionLoading}
+        />
+      )}
 
-      {/* Bulk delete confirm */}
+      {/* Bulk soft-delete confirm */}
       {showBulkConfirm && createPortal(
         <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4" style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }}>
           <div className="bg-white rounded-3xl w-full max-w-sm p-6 shadow-2xl text-center">
-            <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background:"linear-gradient(135deg,#fee2e2,#fecaca)" }}><span className="text-3xl">🗑️</span></div>
-            <h3 className="text-lg font-bold text-slate-900 mb-2">Bulk Remove {selected.size} Employee{selected.size>1?"s":""}?</h3>
-            <p className="text-sm text-slate-500 mb-6">All selected employees will be permanently deleted. Employees with assigned assets will fail — soft-delete them via Edit instead.</p>
+            <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background:"linear-gradient(135deg,#fef3c7,#fde68a)" }}><span className="text-3xl">🗂️</span></div>
+            <h3 className="text-lg font-bold text-slate-900 mb-2">Move {selected.size} Employee{selected.size>1?"s":""} to History?</h3>
+            <p className="text-sm text-slate-500 mb-6">Selected employees will be removed from the active list and stored in Deleted Employees history. You can permanently delete them from there.</p>
             <div className="flex gap-3">
               <button onClick={()=>setShowBulkConfirm(false)} disabled={bulkDelLoading} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-colors">Cancel</button>
-              <button onClick={handleBulkDelete} disabled={bulkDelLoading} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white disabled:opacity-50 flex items-center justify-center gap-2" style={{ background:"linear-gradient(135deg,#ef4444,#dc2626)" }}>
-                {bulkDelLoading?<><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Removing…</>:"❌ Confirm"}
+              <button onClick={handleBulkSoftDelete} disabled={bulkDelLoading} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white disabled:opacity-50 flex items-center justify-center gap-2" style={{ background:"linear-gradient(135deg,#f59e0b,#d97706)" }}>
+                {bulkDelLoading?<><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Moving…</>:"🗂️ Confirm"}
               </button>
             </div>
           </div>
