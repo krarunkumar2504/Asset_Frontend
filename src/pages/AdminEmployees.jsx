@@ -1,15 +1,27 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// AdminEmployeeManagement.jsx  —  UPDATED VERSION WITH SOFT DELETE + HISTORY
+// AdminEmployeeManagement.jsx  —  v4 (localStorage-persisted soft-delete)
 // ═══════════════════════════════════════════════════════════════════════════
-// CHANGES IN THIS VERSION:
-// • DELETE: immediately removes from active list (no "Cannot delete" error)
-// • Soft delete: moves employee to local deletedEmployees state with
-//   deletedAt + deletedBy metadata — does NOT call the backend DELETE until
-//   "Delete Permanently" is clicked from the history panel
-// • "View Deleted Employees" toggle — separate table showing soft-deleted records
-// • "Delete Permanently" button in history table → calls backend DELETE,
-//   removes from history list, shows confirmation dialog
-// • Role badge fixed: icon + text displayed horizontally with flex + gap
+// KEY BEHAVIOURS:
+//
+//  SOFT DELETE (🗑️ on active row)
+//    • Instantly removes employee from active list (no "Cannot delete" error).
+//    • Saves the full employee record + { _deletedAt, _deletedBy } into
+//      localStorage key "deletedEmployees" so it survives page refresh.
+//    • Does NOT call the backend at this stage.
+//    • Deleted IDs are filtered OUT of the active table on every fetch, so
+//      they can never reappear even if the backend still returns them.
+//
+//  HISTORY PANEL (🗂️ View Deleted button)
+//    • Reads from localStorage → always has the correct count after refresh.
+//    • Shows deletedAt / deletedBy metadata per record.
+//
+//  HARD (PERMANENT) DELETE (from history panel)
+//    • Shows a confirmation dialog.
+//    • Calls DELETE /api/employees/:id on the backend to remove from DB.
+//    • Removes the entry from localStorage history regardless of backend result.
+//    • After this the employee is gone from everywhere.
+//
+//  ROLE BADGE — always horizontal (flex-row + gap).
 // ═══════════════════════════════════════════════════════════════════════════
 
 import {
@@ -27,6 +39,21 @@ const api = axios.create({
   timeout: 12000,
 });
 
+// ─── localStorage helpers ─────────────────────────────────────────────────────
+const LS_KEY = "deletedEmployees";
+
+function loadDeletedHistory() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+function saveDeletedHistory(list) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(list)); } catch { /* quota */ }
+}
+
 // ─── Nav items ────────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
   { label: "Dashboard",   icon: "▪",   path: "/dashboard"   },
@@ -40,7 +67,7 @@ const ADMIN_NAV_ITEMS = [
   { label: "Audit Logs",       icon: "📜", path: "/audit-logs"       },
 ];
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Generic helpers ──────────────────────────────────────────────────────────
 function getStoredUser() {
   try { return JSON.parse(localStorage.getItem("user")) ?? {}; } catch { return {}; }
 }
@@ -91,12 +118,10 @@ function getPerformedBy() {
   return u.employeeName || u.name || u.email || "Admin";
 }
 
-// ── normaliseEmp ─────────────────────────────────────────────────────────────
+// ─── normaliseEmp ─────────────────────────────────────────────────────────────
 function normaliseEmp(e) {
-  const deptId =
-    e.department?.id ?? e.departmentId ?? e.department_id ?? null;
-  const deptNameFromObj =
-    e.department?.departmentName ?? e.department?.department_name ?? null;
+  const deptId = e.department?.id ?? e.departmentId ?? e.department_id ?? null;
+  const deptNameFromObj = e.department?.departmentName ?? e.department?.department_name ?? null;
   const joinedDate = e.joinedDate ?? e.joined_date ?? null;
   const createdAt  = e.createdAt  ?? e.created_at  ?? null;
   return {
@@ -125,18 +150,18 @@ function resolveNotifAssetName(rec, map) {
 function buildNotifications(assets, maint, assetMap) {
   const n = [];
   maint.filter(r => deriveStatus(r.nextDueDate) === "Overdue").slice(0, 3).forEach(r =>
-    n.push({ id: `ov-${r.id}`, type: "critical", icon: "🚨", title: "Overdue Maintenance",
-      message: `${resolveNotifAssetName(r, assetMap)} — due on ${r.nextDueDate ?? "unknown date"}`, time: "Overdue" }));
-  assets.filter(a => (a.status ?? "").toLowerCase() === "maintenance").slice(0, 2).forEach(a =>
-    n.push({ id: `mt-${a.id}`, type: "warning", icon: "🔧", title: "Asset Under Maintenance",
-      message: `${a.assetName ?? a.asset_name ?? "Unknown asset"} is currently under maintenance`, time: "Active" }));
+    n.push({ id:`ov-${r.id}`, type:"critical", icon:"🚨", title:"Overdue Maintenance",
+      message:`${resolveNotifAssetName(r,assetMap)} — due on ${r.nextDueDate??"unknown date"}`, time:"Overdue" }));
+  assets.filter(a => (a.status??"").toLowerCase() === "maintenance").slice(0, 2).forEach(a =>
+    n.push({ id:`mt-${a.id}`, type:"warning", icon:"🔧", title:"Asset Under Maintenance",
+      message:`${a.assetName??a.asset_name??"Unknown asset"} is currently under maintenance`, time:"Active" }));
   const p = maint.filter(r => deriveStatus(r.nextDueDate) === "Pending");
-  if (p.length > 0) n.push({ id: "pend", type: "info", icon: "⏳", title: "Upcoming Maintenance",
-    message: `${p.length} task${p.length > 1 ? "s" : ""} due within 60 days`, time: "Upcoming" });
-  const i = assets.filter(a => (a.status ?? "").toLowerCase() === "inactive");
-  if (i.length > 0) n.push({ id: "inact", type: "info", icon: "📦", title: "Inactive Assets",
-    message: `${i.length} asset${i.length > 1 ? "s are" : " is"} inactive`, time: "Review" });
-  n.push({ id: "sys", type: "info", icon: "✅", title: "System Status", message: "All systems operational — data synced", time: "Now" });
+  if (p.length > 0) n.push({ id:"pend", type:"info", icon:"⏳", title:"Upcoming Maintenance",
+    message:`${p.length} task${p.length>1?"s":""} due within 60 days`, time:"Upcoming" });
+  const i = assets.filter(a => (a.status??"").toLowerCase() === "inactive");
+  if (i.length > 0) n.push({ id:"inact", type:"info", icon:"📦", title:"Inactive Assets",
+    message:`${i.length} asset${i.length>1?"s are":" is"} inactive`, time:"Review" });
+  n.push({ id:"sys", type:"info", icon:"✅", title:"System Status", message:"All systems operational — data synced", time:"Now" });
   return n;
 }
 
@@ -146,10 +171,10 @@ function buildNotifications(assets, maint, assetMap) {
 const ToastCtx = createContext(null);
 function useToast() { return useContext(ToastCtx); }
 const T_CFG = {
-  success: { icon:"✅", bar:"linear-gradient(90deg,#10b981,#34d399)", border:"rgba(16,185,129,0.35)", bg:"rgba(240,253,244,0.98)", glow:"0 0 0 1px rgba(16,185,129,0.2),0 20px 60px rgba(16,185,129,0.18),0 4px 16px rgba(0,0,0,0.12)", titleC:"#064e3b", msgC:"#065f46", iconBg:"linear-gradient(135deg,#10b981,#059669)", tagBg:"rgba(16,185,129,0.12)", tagC:"#047857", tag:"SUCCESS", dur:4000 },
-  error:   { icon:"❌", bar:"linear-gradient(90deg,#ef4444,#f87171)", border:"rgba(239,68,68,0.35)", bg:"rgba(255,241,241,0.98)", glow:"0 0 0 1px rgba(239,68,68,0.2),0 20px 60px rgba(239,68,68,0.18),0 4px 16px rgba(0,0,0,0.12)", titleC:"#7f1d1d", msgC:"#991b1b", iconBg:"linear-gradient(135deg,#ef4444,#dc2626)", tagBg:"rgba(239,68,68,0.12)", tagC:"#b91c1c", tag:"ERROR", dur:6000 },
-  warning: { icon:"⚠️", bar:"linear-gradient(90deg,#f59e0b,#fcd34d)", border:"rgba(245,158,11,0.35)", bg:"rgba(255,251,235,0.98)", glow:"0 0 0 1px rgba(245,158,11,0.2),0 20px 60px rgba(245,158,11,0.15),0 4px 16px rgba(0,0,0,0.12)", titleC:"#78350f", msgC:"#92400e", iconBg:"linear-gradient(135deg,#f59e0b,#d97706)", tagBg:"rgba(245,158,11,0.12)", tagC:"#b45309", tag:"WARNING", dur:5000 },
-  info:    { icon:"ℹ️", bar:"linear-gradient(90deg,#4f46e5,#818cf8)", border:"rgba(79,70,229,0.35)", bg:"rgba(245,243,255,0.98)", glow:"0 0 0 1px rgba(79,70,229,0.2),0 20px 60px rgba(79,70,229,0.15),0 4px 16px rgba(0,0,0,0.12)", titleC:"#1e1b4b", msgC:"#3730a3", iconBg:"linear-gradient(135deg,#4f46e5,#7c3aed)", tagBg:"rgba(79,70,229,0.12)", tagC:"#4338ca", tag:"INFO", dur:4000 },
+  success:{ icon:"✅", bar:"linear-gradient(90deg,#10b981,#34d399)", border:"rgba(16,185,129,0.35)", bg:"rgba(240,253,244,0.98)", glow:"0 0 0 1px rgba(16,185,129,0.2),0 20px 60px rgba(16,185,129,0.18),0 4px 16px rgba(0,0,0,0.12)", titleC:"#064e3b", msgC:"#065f46", iconBg:"linear-gradient(135deg,#10b981,#059669)", tagBg:"rgba(16,185,129,0.12)", tagC:"#047857", tag:"SUCCESS", dur:4000 },
+  error:  { icon:"❌", bar:"linear-gradient(90deg,#ef4444,#f87171)", border:"rgba(239,68,68,0.35)", bg:"rgba(255,241,241,0.98)", glow:"0 0 0 1px rgba(239,68,68,0.2),0 20px 60px rgba(239,68,68,0.18),0 4px 16px rgba(0,0,0,0.12)", titleC:"#7f1d1d", msgC:"#991b1b", iconBg:"linear-gradient(135deg,#ef4444,#dc2626)", tagBg:"rgba(239,68,68,0.12)", tagC:"#b91c1c", tag:"ERROR", dur:6000 },
+  warning:{ icon:"⚠️", bar:"linear-gradient(90deg,#f59e0b,#fcd34d)", border:"rgba(245,158,11,0.35)", bg:"rgba(255,251,235,0.98)", glow:"0 0 0 1px rgba(245,158,11,0.2),0 20px 60px rgba(245,158,11,0.15),0 4px 16px rgba(0,0,0,0.12)", titleC:"#78350f", msgC:"#92400e", iconBg:"linear-gradient(135deg,#f59e0b,#d97706)", tagBg:"rgba(245,158,11,0.12)", tagC:"#b45309", tag:"WARNING", dur:5000 },
+  info:   { icon:"ℹ️", bar:"linear-gradient(90deg,#4f46e5,#818cf8)", border:"rgba(79,70,229,0.35)", bg:"rgba(245,243,255,0.98)", glow:"0 0 0 1px rgba(79,70,229,0.2),0 20px 60px rgba(79,70,229,0.15),0 4px 16px rgba(0,0,0,0.12)", titleC:"#1e1b4b", msgC:"#3730a3", iconBg:"linear-gradient(135deg,#4f46e5,#7c3aed)", tagBg:"rgba(79,70,229,0.12)", tagC:"#4338ca", tag:"INFO", dur:4000 },
 };
 function ToastCard({ t, remove }) {
   const c = T_CFG[t.type] ?? T_CFG.info;
@@ -165,19 +190,19 @@ function ToastCard({ t, remove }) {
   const close = () => { setVis(false); setTimeout(() => remove(t.id), 380); };
   const isMob = window.innerWidth < 640;
   return (
-    <div style={{ transform: vis ? "translateY(0) scale(1)" : isMob ? "translateY(80px) scale(0.92)" : "translateX(110%) scale(0.92)", opacity: vis ? 1 : 0, transition: "transform 0.4s cubic-bezier(0.34,1.56,0.64,1),opacity 0.4s ease", background: c.bg, border: `1.5px solid ${c.border}`, borderRadius: 18, overflow: "hidden", boxShadow: c.glow, width: "100%", pointerEvents: "auto", position: "relative" }}>
-      <div style={{ height: 3, background: c.bar, position: "absolute", top: 0, left: 0, right: 0 }} />
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "16px 14px 14px" }}>
-        <div style={{ width: 42, height: 42, borderRadius: 14, background: c.iconBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>{c.icon}</div>
-        <div style={{ flex: 1, minWidth: 0, paddingTop: 1 }}>
-          <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.1em", background: c.tagBg, color: c.tagC, borderRadius: 5, padding: "2px 6px", textTransform: "uppercase", display: "inline-block", marginBottom: 4 }}>{c.tag}</span>
-          <p style={{ fontSize: 13, fontWeight: 700, color: c.titleC, marginBottom: 3, lineHeight: 1.3 }}>{t.title}</p>
-          {t.message && <p style={{ fontSize: 12, color: c.msgC, lineHeight: 1.55, margin: 0, opacity: 0.85 }}>{t.message}</p>}
+    <div style={{ transform:vis?"translateY(0) scale(1)":isMob?"translateY(80px) scale(0.92)":"translateX(110%) scale(0.92)", opacity:vis?1:0, transition:"transform 0.4s cubic-bezier(0.34,1.56,0.64,1),opacity 0.4s ease", background:c.bg, border:`1.5px solid ${c.border}`, borderRadius:18, overflow:"hidden", boxShadow:c.glow, width:"100%", pointerEvents:"auto", position:"relative" }}>
+      <div style={{ height:3, background:c.bar, position:"absolute", top:0, left:0, right:0 }} />
+      <div style={{ display:"flex", alignItems:"flex-start", gap:12, padding:"16px 14px 14px" }}>
+        <div style={{ width:42, height:42, borderRadius:14, background:c.iconBg, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20, flexShrink:0 }}>{c.icon}</div>
+        <div style={{ flex:1, minWidth:0, paddingTop:1 }}>
+          <span style={{ fontSize:9, fontWeight:800, letterSpacing:"0.1em", background:c.tagBg, color:c.tagC, borderRadius:5, padding:"2px 6px", textTransform:"uppercase", display:"inline-block", marginBottom:4 }}>{c.tag}</span>
+          <p style={{ fontSize:13, fontWeight:700, color:c.titleC, marginBottom:3, lineHeight:1.3 }}>{t.title}</p>
+          {t.message && <p style={{ fontSize:12, color:c.msgC, lineHeight:1.55, margin:0, opacity:0.85 }}>{t.message}</p>}
         </div>
-        <button onClick={close} style={{ width: 26, height: 26, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.06)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: "#64748b", flexShrink: 0, marginTop: 2 }}>✕</button>
+        <button onClick={close} style={{ width:26, height:26, borderRadius:8, border:"none", background:"rgba(0,0,0,0.06)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, color:"#64748b", flexShrink:0, marginTop:2 }}>✕</button>
       </div>
-      <div style={{ height: 4, background: "rgba(0,0,0,0.07)" }}>
-        <div style={{ height: "100%", width: `${w}%`, background: c.bar, transition: "width 0.05s linear" }} />
+      <div style={{ height:4, background:"rgba(0,0,0,0.07)" }}>
+        <div style={{ height:"100%", width:`${w}%`, background:c.bar, transition:"width 0.05s linear" }} />
       </div>
     </div>
   );
@@ -185,7 +210,7 @@ function ToastCard({ t, remove }) {
 function ToastContainer({ toasts, remove }) {
   const isMob = window.innerWidth < 640;
   return createPortal(
-    <div style={{ position: "fixed", zIndex: 99999, pointerEvents: "none", display: "flex", flexDirection: "column", gap: 10, ...(isMob ? { bottom: 16, left: 12, right: 12 } : { top: 72, right: 20, width: 380, alignItems: "flex-end" }) }}>
+    <div style={{ position:"fixed", zIndex:99999, pointerEvents:"none", display:"flex", flexDirection:"column", gap:10, ...(isMob?{bottom:16,left:12,right:12}:{top:72,right:20,width:380,alignItems:"flex-end"}) }}>
       {toasts.map(t => <ToastCard key={t.id} t={t} remove={remove} />)}
     </div>, document.body
   );
@@ -194,14 +219,12 @@ function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
   const add = useCallback((type, title, message) => {
     const id = Date.now() + Math.random();
-    setToasts(p => { const n = [...p, { id, type, title, message }]; return n.length > 4 ? n.slice(-4) : n; });
+    setToasts(p => { const n=[...p,{id,type,title,message}]; return n.length>4?n.slice(-4):n; });
   }, []);
   const remove = useCallback(id => setToasts(p => p.filter(t => t.id !== id)), []);
   const toast = useMemo(() => ({
-    success: (t, m) => add("success", t, m),
-    error:   (t, m) => add("error",   t, m),
-    warning: (t, m) => add("warning", t, m),
-    info:    (t, m) => add("info",    t, m),
+    success:(t,m)=>add("success",t,m), error:(t,m)=>add("error",t,m),
+    warning:(t,m)=>add("warning",t,m), info:(t,m)=>add("info",t,m),
   }), [add]);
   return (
     <ToastCtx.Provider value={{ toast }}>
@@ -214,15 +237,15 @@ function ToastProvider({ children }) {
 // ─── NOTIFICATION DROPDOWN ────────────────────────────────────────────────────
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
   const TS = {
-    critical: { iconBg:"bg-red-100",    dot:"bg-red-500",    title:"text-red-700"    },
-    warning:  { iconBg:"bg-amber-100",  dot:"bg-amber-500",  title:"text-amber-700"  },
-    info:     { iconBg:"bg-indigo-100", dot:"bg-indigo-400", title:"text-indigo-700" },
+    critical:{ iconBg:"bg-red-100",    dot:"bg-red-500",    title:"text-red-700"    },
+    warning: { iconBg:"bg-amber-100",  dot:"bg-amber-500",  title:"text-amber-700"  },
+    info:    { iconBg:"bg-indigo-100", dot:"bg-indigo-400", title:"text-indigo-700" },
   };
   const isMobile = window.innerWidth < 480;
   const topOffset = (anchorRect?.bottom ?? 60) + 8;
   const style = isMobile
     ? { position:"fixed", top:topOffset, left:12, right:12, zIndex:9999, background:"#fff", borderRadius:16, overflow:"hidden", boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)", border:"1px solid rgba(79,70,229,.1)" }
-    : { position:"fixed", top:topOffset, right: Math.max(8, window.innerWidth - (anchorRect?.right ?? 60)), width:320, zIndex:9999, background:"#fff", borderRadius:16, overflow:"hidden", boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)", border:"1px solid rgba(79,70,229,.1)" };
+    : { position:"fixed", top:topOffset, right:Math.max(8,window.innerWidth-(anchorRect?.right??60)), width:320, zIndex:9999, background:"#fff", borderRadius:16, overflow:"hidden", boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)", border:"1px solid rgba(79,70,229,.1)" };
   return createPortal(
     <>
       <div style={{ position:"fixed", inset:0, zIndex:9998 }} onClick={onClose} />
@@ -272,8 +295,8 @@ function SidebarContent({ onNavigate }) {
     const on = location.pathname === item.path || (item.path !== "/dashboard" && location.pathname.startsWith(item.path));
     return (
       <button onClick={() => go(item.path)}
-        className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative ${on ? "text-white" : "text-indigo-300 hover:text-indigo-100 hover:bg-white/5"}`}
-        style={on ? { background:"linear-gradient(90deg,rgba(99,102,241,.5),rgba(20,184,166,.3))", boxShadow:"0 0 20px rgba(99,102,241,.3)" } : {}}>
+        className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative ${on?"text-white":"text-indigo-300 hover:text-indigo-100 hover:bg-white/5"}`}
+        style={on?{background:"linear-gradient(90deg,rgba(99,102,241,.5),rgba(20,184,166,.3))",boxShadow:"0 0 20px rgba(99,102,241,.3)"}:{}}>
         {on && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full" style={{ background:"linear-gradient(180deg,#818cf8,#34d399)" }} />}
         <span className="text-sm w-4 text-center">{item.icon}</span>
         <span className="flex-1">{item.label}</span>
@@ -298,9 +321,9 @@ function SidebarContent({ onNavigate }) {
         </>
       )}
       <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
-        <p className="text-xs font-semibold tracking-wide uppercase" style={{ color: isAdmin ? "#34d399" : "#a5b4fc" }}>{user.role ?? "Employee"}</p>
+        <p className="text-xs font-semibold tracking-wide uppercase" style={{ color:isAdmin?"#34d399":"#a5b4fc" }}>{user.role??"Employee"}</p>
         <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{getDisplayName(user)}</p>
-        <p className="text-xs text-indigo-600 mt-0.5">v3.2.0 — Pro Plan</p>
+        <p className="text-xs text-indigo-600 mt-0.5">v4.0.0 — Pro Plan</p>
       </div>
     </div>
   );
@@ -327,7 +350,7 @@ function Navbar({ onMenuToggle, notifications }) {
   const dName = getDisplayName(user), ini = getUserInitials(user);
   const urgent = notifications.filter(n => n.type === "critical" || n.type === "warning").length;
   const handleBell = () => { if (bellRef.current) setAnchorRect(bellRef.current.getBoundingClientRect()); setNotifOpen(o => !o); };
-  const logout = () => { localStorage.removeItem("user"); toast.info("Signed Out","Logged out successfully."); setTimeout(() => navigate("/"), 600); };
+  const logout = () => { localStorage.removeItem("user"); toast.info("Signed Out","Logged out successfully."); setTimeout(()=>navigate("/"),600); };
   return (
     <header className="h-14 flex items-center px-4 sm:px-6 gap-3 flex-shrink-0 border-b" style={{ background:"rgba(255,255,255,.85)", backdropFilter:"blur(12px)", borderColor:"rgba(79,70,229,.08)" }}>
       <button onClick={onMenuToggle} className="lg:hidden w-8 h-8 rounded-lg flex items-center justify-center border border-indigo-100 bg-indigo-50/60 text-indigo-600 hover:bg-indigo-100 transition-colors flex-shrink-0">
@@ -349,7 +372,7 @@ function Navbar({ onMenuToggle, notifications }) {
           </span>
         )}
       </button>
-      {notifOpen && <NotificationDropdown notifications={notifications} anchorRect={anchorRect} onClose={() => setNotifOpen(false)} />}
+      {notifOpen && <NotificationDropdown notifications={notifications} anchorRect={anchorRect} onClose={()=>setNotifOpen(false)} />}
       <div className="flex items-center gap-2 border border-indigo-100 rounded-full px-2 py-1 bg-white cursor-pointer flex-shrink-0">
         <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold" style={{ background:"linear-gradient(135deg,#4f46e5,#14b8a6)" }}>{ini}</div>
         <span className="text-xs font-medium text-slate-700 hidden sm:block max-w-20 truncate">{dName.split(" ")[0]}</span>
@@ -362,53 +385,44 @@ function Navbar({ onMenuToggle, notifications }) {
 }
 
 // ─── BADGES ───────────────────────────────────────────────────────────────────
-// FIX: Role badge now uses flexbox with row direction to keep icon + text horizontal
+// Role badge: always horizontal — flex-row + gap, no vertical stacking
 function RoleBadge({ role }) {
   const isAdmin = role === "Admin";
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        flexDirection: "row",
-        alignItems: "center",
-        gap: "6px",
-        padding: "2px 10px",
-        borderRadius: 9999,
-        fontSize: 12,
-        fontWeight: 700,
-        whiteSpace: "nowrap",
-        border: `1px solid ${isAdmin ? "#ddd6fe" : "#bfdbfe"}`,
-        background: isAdmin ? "#f5f3ff" : "#eff6ff",
-        color: isAdmin ? "#6d28d9" : "#1d4ed8",
-      }}
-    >
-      <span style={{ fontSize: 12, lineHeight: 1 }}>{isAdmin ? "🔐" : "👤"}</span>
-      <span>{role || "—"}</span>
+    <span style={{
+      display:"inline-flex", flexDirection:"row", alignItems:"center", gap:6,
+      padding:"2px 10px", borderRadius:9999, fontSize:12, fontWeight:700,
+      whiteSpace:"nowrap",
+      border:`1px solid ${isAdmin?"#ddd6fe":"#bfdbfe"}`,
+      background:isAdmin?"#f5f3ff":"#eff6ff",
+      color:isAdmin?"#6d28d9":"#1d4ed8",
+    }}>
+      <span style={{ fontSize:12, lineHeight:1 }}>{isAdmin?"🔐":"👤"}</span>
+      <span>{role||"—"}</span>
     </span>
   );
 }
-
 function StatusBadge({ status }) {
   const cfg = {
-    Active:   { cls:"bg-emerald-50 text-emerald-700 border-emerald-200", dot:"bg-emerald-500" },
-    Inactive: { cls:"bg-amber-50 text-amber-700 border-amber-200",       dot:"bg-amber-400"   },
-    Removed:  { cls:"bg-red-50 text-red-600 border-red-200",             dot:"bg-red-500"     },
+    Active:  { cls:"bg-emerald-50 text-emerald-700 border-emerald-200", dot:"bg-emerald-500" },
+    Inactive:{ cls:"bg-amber-50 text-amber-700 border-amber-200",       dot:"bg-amber-400"   },
+    Removed: { cls:"bg-red-50 text-red-600 border-red-200",             dot:"bg-red-500"     },
   };
   const s = cfg[status] ?? { cls:"bg-slate-100 text-slate-500 border-slate-200", dot:"bg-slate-400" };
   return (
     <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold border ${s.cls}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />{status ?? "Active"}
+      <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />{status??"Active"}
     </span>
   );
 }
 
 // ─── SKELETON / CHECKBOX / STAT CARD ─────────────────────────────────────────
-function SkeletonRow({ cols = 11 }) {
+function SkeletonRow({ cols=11 }) {
   return (
     <tr className="animate-pulse">
-      {Array.from({ length: cols }).map((_, i) => (
+      {Array.from({length:cols}).map((_,i) => (
         <td key={i} className="px-3 py-3.5">
-          <div className="h-3.5 bg-slate-100 rounded-full" style={{ width: [32,40,150,130,70,80,90,80,90,100,60][i] || 80 }} />
+          <div className="h-3.5 bg-slate-100 rounded-full" style={{ width:[32,40,150,130,70,80,90,80,90,100,60][i]||80 }} />
         </td>
       ))}
     </tr>
@@ -441,9 +455,8 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
   const deptName = deptMap[employee?.departmentId] || employee?.departmentName || "—";
   return createPortal(
     <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
-      style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }}
-      onClick={onClose}>
-      <div className="bg-white rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+      style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }} onClick={onClose}>
+      <div className="bg-white rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl max-h-[90vh] flex flex-col" onClick={e=>e.stopPropagation()}>
         <div className="relative px-6 py-6 text-white flex-shrink-0" style={{ background:"linear-gradient(135deg,#1e1b4b,#312e81,#134e4a)" }}>
           <div className="absolute inset-0 opacity-20" style={{ background:"radial-gradient(circle at top right,white,transparent 60%)" }} />
           <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 rounded-xl bg-white/15 hover:bg-white/30 flex items-center justify-center text-white transition-colors z-10 text-sm font-bold">✕</button>
@@ -514,13 +527,11 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
     status:       employee?.status       || "Active",
     password:     "",
     joinedDate: employee?.joinedDate
-      ? (typeof employee.joinedDate === "string"
-          ? employee.joinedDate.split("T")[0]
-          : String(employee.joinedDate))
+      ? (typeof employee.joinedDate==="string" ? employee.joinedDate.split("T")[0] : String(employee.joinedDate))
       : "",
   });
   const [showPass, setShowPass] = useState(false);
-  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+  const set = (k,v) => setForm(p=>({...p,[k]:v}));
   return createPortal(
     <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4" style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }}>
       <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl max-h-[90vh] flex flex-col">
@@ -535,56 +546,56 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
           <button onClick={onClose} className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-100 transition-colors">✕</button>
         </div>
         <div className="p-6 flex flex-col gap-4 overflow-y-auto">
-          <div>
-            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Full Name</label>
-            <input type="text" value={form.employeeName} onChange={e => set("employeeName",e.target.value)} placeholder="Full name"
-              className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Email</label>
-            <input type="email" value={form.email} onChange={e => set("email",e.target.value)} placeholder="email@company.com"
-              className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
-          </div>
+          {[
+            {label:"Full Name",k:"employeeName",type:"text",    ph:"Full name"},
+            {label:"Email",    k:"email",       type:"email",   ph:"email@company.com"},
+          ].map(f=>(
+            <div key={f.k}>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">{f.label}</label>
+              <input type={f.type} value={form[f.k]} onChange={e=>set(f.k,e.target.value)} placeholder={f.ph}
+                className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
+            </div>
+          ))}
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
               New Password <span className="text-slate-300 normal-case font-normal">(leave blank to keep current)</span>
             </label>
             <div className="relative">
-              <input type={showPass?"text":"password"} value={form.password} onChange={e => set("password",e.target.value)} placeholder="Enter new password…"
+              <input type={showPass?"text":"password"} value={form.password} onChange={e=>set("password",e.target.value)} placeholder="Enter new password…"
                 className="w-full px-3 py-2.5 pr-10 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
-              <button type="button" onClick={() => setShowPass(p=>!p)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs">{showPass?"🙈":"👁"}</button>
+              <button type="button" onClick={()=>setShowPass(p=>!p)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs">{showPass?"🙈":"👁"}</button>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Role</label>
-              <select value={form.role} onChange={e => set("role",e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white transition-all">
+              <select value={form.role} onChange={e=>set("role",e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white transition-all">
                 <option>Admin</option><option>Employee</option>
               </select>
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Status</label>
-              <select value={form.status} onChange={e => set("status",e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white transition-all">
+              <select value={form.status} onChange={e=>set("status",e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white transition-all">
                 <option>Active</option><option>Inactive</option><option>Removed</option>
               </select>
             </div>
           </div>
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Department</label>
-            <select value={form.departmentId} onChange={e => set("departmentId",e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white transition-all">
+            <select value={form.departmentId} onChange={e=>set("departmentId",e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white transition-all">
               <option value="">— No Department —</option>
-              {departments.map(d => <option key={d.id} value={String(d.id)}>{d.departmentName||d.department_name}</option>)}
+              {departments.map(d=><option key={d.id} value={String(d.id)}>{d.departmentName||d.department_name}</option>)}
             </select>
           </div>
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Joined Date</label>
-            <input type="date" value={form.joinedDate} onChange={e => set("joinedDate",e.target.value)}
+            <input type="date" value={form.joinedDate} onChange={e=>set("joinedDate",e.target.value)}
               className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all text-slate-700" />
           </div>
         </div>
         <div className="flex gap-3 px-6 pb-6 flex-shrink-0">
           <button onClick={onClose} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors">Cancel</button>
-          <button onClick={() => onSave(form)} disabled={loading}
+          <button onClick={()=>onSave(form)} disabled={loading}
             className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white disabled:opacity-50 flex items-center justify-center gap-2 transition-all"
             style={{ background:"linear-gradient(90deg,#4f46e5,#7c3aed)", boxShadow:"0 4px 14px rgba(79,70,229,.4)" }}>
             {loading?<><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Saving…</>:"✓ Save Changes"}
@@ -595,8 +606,8 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
   );
 }
 
-// ─── CONFIRM SOFT DELETE (moves to history) ───────────────────────────────────
-function ConfirmSoftDeleteModal({ employee, onConfirm, onCancel, loading }) {
+// ─── CONFIRM SOFT DELETE ──────────────────────────────────────────────────────
+function ConfirmSoftDeleteModal({ employee, onConfirm, onCancel }) {
   return createPortal(
     <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4" style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }}>
       <div className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl">
@@ -606,18 +617,17 @@ function ConfirmSoftDeleteModal({ employee, onConfirm, onCancel, loading }) {
           </div>
           <h3 className="text-lg font-bold text-slate-900 mb-2">Remove Employee?</h3>
           <p className="text-sm text-slate-500 leading-relaxed">
-            <span className="font-semibold text-amber-600">{employee?.employeeName||"This employee"}</span> will be removed from the active list and moved to the <span className="font-semibold text-indigo-600">Deleted Employees</span> history.
+            <span className="font-semibold text-amber-600">{employee?.employeeName||"This employee"}</span> will be removed from the active list and stored in <span className="font-semibold text-indigo-600">Deleted History</span>.
           </p>
           <p className="text-xs text-indigo-600 mt-3 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
-            ℹ️ You can permanently delete from the history panel, or restore by contacting support.
+            ℹ️ They will stay in history until you permanently delete them from there.
           </p>
         </div>
         <div className="flex gap-3 px-6 pb-6">
-          <button onClick={onCancel} disabled={loading} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors disabled:opacity-50">Cancel</button>
-          <button onClick={onConfirm} disabled={loading}
-            className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+          <button onClick={onCancel} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors">Cancel</button>
+          <button onClick={onConfirm} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white flex items-center justify-center gap-2 transition-all"
             style={{ background:"linear-gradient(135deg,#f59e0b,#d97706)", boxShadow:"0 4px 14px rgba(245,158,11,.4)" }}>
-            {loading?<><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Removing…</>:"🗂️ Move to History"}
+            🗂️ Move to History
           </button>
         </div>
       </div>
@@ -625,10 +635,10 @@ function ConfirmSoftDeleteModal({ employee, onConfirm, onCancel, loading }) {
   );
 }
 
-// ─── CONFIRM HARD (PERMANENT) DELETE ─────────────────────────────────────────
+// ─── CONFIRM HARD DELETE ──────────────────────────────────────────────────────
 function ConfirmHardDeleteModal({ employee, onConfirm, onCancel, loading }) {
   return createPortal(
-    <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4" style={{ background:"rgba(15,10,40,0.85)", backdropFilter:"blur(8px)" }}>
+    <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4" style={{ background:"rgba(15,10,40,0.88)", backdropFilter:"blur(8px)" }}>
       <div className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl">
         <div className="p-6 text-center">
           <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background:"linear-gradient(135deg,#fee2e2,#fecaca)" }}>
@@ -638,7 +648,7 @@ function ConfirmHardDeleteModal({ employee, onConfirm, onCancel, loading }) {
           <p className="text-sm text-slate-500 leading-relaxed">
             This will <span className="font-bold text-red-600">permanently delete</span>{" "}
             <span className="font-semibold text-slate-700">{employee?.employeeName||"this employee"}</span>{" "}
-            from the database and history.
+            from the database and remove them from history.
           </p>
           <p className="text-xs text-red-600 mt-3 bg-red-50 border border-red-200 rounded-lg px-3 py-2 font-semibold">
             🚨 This action cannot be undone.
@@ -657,15 +667,10 @@ function ConfirmHardDeleteModal({ employee, onConfirm, onCancel, loading }) {
   );
 }
 
-// ─── DELETED EMPLOYEES TABLE ──────────────────────────────────────────────────
-function DeletedEmployeesTable({ deletedEmployees, deptMap, onHardDelete, hardDeleteLoading }) {
-  const [hardDeleteTarget, setHardDeleteTarget] = useState(null);
-
-  const confirmHardDelete = () => {
-    if (!hardDeleteTarget) return;
-    onHardDelete(hardDeleteTarget, () => setHardDeleteTarget(null));
-  };
-
+// ─── DELETED EMPLOYEES HISTORY TABLE ─────────────────────────────────────────
+function DeletedEmployeesTable({ deletedHistory, deptMap, onHardDelete, hardDeleteLoading }) {
+  const [target, setTarget] = useState(null);
+  const doHardDelete = () => { if (!target) return; onHardDelete(target, ()=>setTarget(null)); };
   return (
     <div className="bg-white rounded-2xl border border-red-100 overflow-hidden" style={{ boxShadow:"0 2px 12px rgba(239,68,68,.08)" }}>
       <div className="flex items-center justify-between px-5 py-3.5 border-b border-red-50" style={{ background:"linear-gradient(90deg,#fff5f5,#fff8f1)" }}>
@@ -673,10 +678,11 @@ function DeletedEmployeesTable({ deletedEmployees, deptMap, onHardDelete, hardDe
           <span className="text-base">🗂️</span>
           <span className="text-sm font-bold text-red-900">Deleted Employees History</span>
         </div>
-        <span className="text-xs text-red-400 font-medium">{deletedEmployees.length} record{deletedEmployees.length !== 1 ? "s" : ""}</span>
+        <span className="text-xs text-red-400 font-medium bg-red-50 border border-red-100 px-2 py-0.5 rounded-full">
+          {deletedHistory.length} record{deletedHistory.length!==1?"s":""}
+        </span>
       </div>
-
-      {deletedEmployees.length === 0 ? (
+      {deletedHistory.length === 0 ? (
         <div className="flex flex-col items-center gap-3 py-14">
           <span className="text-4xl">🗂️</span>
           <p className="text-sm font-semibold text-slate-400">No deleted employees</p>
@@ -684,21 +690,21 @@ function DeletedEmployeesTable({ deletedEmployees, deptMap, onHardDelete, hardDe
         </div>
       ) : (
         <div style={{ overflowX:"auto" }}>
-          <table className="w-full text-sm" style={{ minWidth: 860 }}>
+          <table className="w-full text-sm" style={{ minWidth:860 }}>
             <thead>
               <tr style={{ background:"linear-gradient(90deg,#fff5f5,#fff8f1)" }}>
-                {["#","Employee","Email","Role","Department","Deleted At","Deleted By","Action"].map(h => (
+                {["#","Employee","Email","Role","Department","Deleted At","Deleted By","Action"].map(h=>(
                   <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-red-300 uppercase tracking-wider whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {deletedEmployees.map((emp, idx) => {
+              {deletedHistory.map((emp,idx) => {
                 const deptName = deptMap[emp.departmentId] || emp.departmentName || "—";
                 return (
-                  <tr key={emp._deletedKey || emp.id}
+                  <tr key={emp._deletedKey}
                     className="border-b border-red-50/60 hover:bg-red-50/30 transition-colors"
-                    style={{ background: idx % 2 === 1 ? "rgba(255,245,245,0.5)" : "white" }}>
+                    style={{ background:idx%2===1?"rgba(255,245,245,0.5)":"white" }}>
                     <td className="px-3 py-3.5">
                       <span className="text-xs font-mono font-bold text-red-300 bg-red-50 px-2 py-0.5 rounded-md">#{emp.id}</span>
                     </td>
@@ -716,18 +722,14 @@ function DeletedEmployeesTable({ deletedEmployees, deptMap, onHardDelete, hardDe
                       <span className="text-xs font-medium text-slate-400 bg-slate-50 border border-slate-100 px-2 py-0.5 rounded-lg">🏢 {deptName}</span>
                     </td>
                     <td className="px-3 py-3.5 whitespace-nowrap">
-                      <div>
-                        <p className="text-xs font-medium text-red-500">{fmtDate(emp._deletedAt)}</p>
-                        <p className="text-xs text-slate-300" style={{fontSize:10}}>{fmtFull(emp._deletedAt).split(",")[1]?.trim()||""}</p>
-                      </div>
+                      <p className="text-xs font-medium text-red-500">{fmtDate(emp._deletedAt)}</p>
+                      <p className="text-xs text-slate-300" style={{fontSize:10}}>{fmtFull(emp._deletedAt).split(",")[1]?.trim()||""}</p>
                     </td>
                     <td className="px-3 py-3.5">
                       <span className="text-xs font-semibold text-slate-500 bg-slate-50 border border-slate-100 px-2 py-0.5 rounded-lg">{emp._deletedBy||"Admin"}</span>
                     </td>
                     <td className="px-3 py-3.5">
-                      <button
-                        onClick={() => setHardDeleteTarget(emp)}
-                        disabled={hardDeleteLoading}
+                      <button onClick={()=>setTarget(emp)} disabled={hardDeleteLoading}
                         className="inline-flex items-center gap-1.5 text-xs font-bold text-white px-3 py-1.5 rounded-lg disabled:opacity-50 transition-all hover:shadow-md"
                         style={{ background:"linear-gradient(135deg,#ef4444,#dc2626)" }}>
                         🗑️ Delete Permanently
@@ -740,12 +742,11 @@ function DeletedEmployeesTable({ deletedEmployees, deptMap, onHardDelete, hardDe
           </table>
         </div>
       )}
-
-      {hardDeleteTarget && (
+      {target && (
         <ConfirmHardDeleteModal
-          employee={hardDeleteTarget}
-          onConfirm={confirmHardDelete}
-          onCancel={() => setHardDeleteTarget(null)}
+          employee={target}
+          onConfirm={doHardDelete}
+          onCancel={()=>setTarget(null)}
           loading={hardDeleteLoading}
         />
       )}
@@ -763,7 +764,7 @@ function AccessDenied() {
         <h2 className="text-2xl font-black text-slate-900 mb-2">Access Denied</h2>
         <p className="text-slate-500 text-sm max-w-xs">Admin access is required to view this page.</p>
       </div>
-      <button onClick={() => navigate("/dashboard")} className="px-6 py-3 rounded-xl text-sm font-bold text-white" style={{ background:"linear-gradient(90deg,#4f46e5,#7c3aed)", boxShadow:"0 4px 14px rgba(79,70,229,.4)" }}>
+      <button onClick={()=>navigate("/dashboard")} className="px-6 py-3 rounded-xl text-sm font-bold text-white" style={{ background:"linear-gradient(90deg,#4f46e5,#7c3aed)", boxShadow:"0 4px 14px rgba(79,70,229,.4)" }}>
         ← Return to Dashboard
       </button>
     </div>
@@ -775,46 +776,56 @@ function AccessDenied() {
 // ═══════════════════════════════════════════════════════════════════════════
 function EmployeeManagementContent() {
   const { toast } = useToast();
-  const [employees,    setEmployees]   = useState([]);
-  const [departments,  setDepartments] = useState([]);
-  const [loading,      setLoading]     = useState(true);
-  const [search,       setSearch]      = useState("");
-  const [filterRole,   setFilterRole]  = useState("All");
-  const [filterStatus, setFilterStatus]= useState("All");
-  const [filterDept,   setFilterDept]  = useState("All");
-  const [page, setPage] = useState(1);
-  const PAGE_SIZE = 8;
-  const [selected, setSelected] = useState(new Set());
 
-  // ── Soft-delete history (local state) ──────────────────────────────────────
-  // Each entry: normalised employee + { _deletedAt, _deletedBy, _deletedKey }
-  const [deletedEmployees,  setDeletedEmployees]  = useState([]);
+  // ── Persisted soft-delete history ────────────────────────────────────────
+  // Initialise synchronously from localStorage so count is correct before
+  // any fetch completes. Every mutation also calls saveDeletedHistory() so
+  // the state and localStorage are always in sync.
+  const [deletedHistory, setDeletedHistory] = useState(() => loadDeletedHistory());
+
+  // Keep a ref so fetchAll (a memoised callback) can always read the latest set
+  const deletedHistoryRef = useRef(deletedHistory);
+  useEffect(() => {
+    deletedHistoryRef.current = deletedHistory;
+    saveDeletedHistory(deletedHistory);
+  }, [deletedHistory]);
+
+  // Set of numeric IDs in history — used to filter the active employee list
+  const deletedIdSet = useMemo(
+    () => new Set(deletedHistory.map(d => Number(d.id))),
+    [deletedHistory]
+  );
+
+  const [employees,    setEmployees]    = useState([]);
+  const [departments,  setDepartments]  = useState([]);
+  const [loading,      setLoading]      = useState(true);
+  const [search,       setSearch]       = useState("");
+  const [filterRole,   setFilterRole]   = useState("All");
+  const [filterStatus, setFilterStatus] = useState("All");
+  const [filterDept,   setFilterDept]   = useState("All");
+  const [page,         setPage]         = useState(1);
+  const PAGE_SIZE = 8;
+  const [selected,          setSelected]         = useState(new Set());
   const [showDeletedPanel,  setShowDeletedPanel]  = useState(false);
   const [hardDeleteLoading, setHardDeleteLoading] = useState(false);
-
-  const [viewEmp,         setViewEmp]         = useState(null);
-  const [editEmp,         setEditEmp]         = useState(null);
-  // Soft-delete confirm dialog target
-  const [softDeleteEmp,   setSoftDeleteEmp]   = useState(null);
-  const [assignedAssets,  setAssignedAssets]  = useState([]);
-  const [actionLoading,   setActionLoading]   = useState(false);
-  const [showBulkConfirm, setShowBulkConfirm] = useState(false);
-  const [bulkDelLoading,  setBulkDelLoading]  = useState(false);
-  const [showCreate,      setShowCreate]      = useState(false);
-  const [createForm, setCreateForm] = useState({
-    employeeName:"", email:"", password:"", role:"Employee", departmentId:"", joinedDate:""
-  });
+  const [viewEmp,        setViewEmp]        = useState(null);
+  const [editEmp,        setEditEmp]        = useState(null);
+  const [softDeleteEmp,  setSoftDeleteEmp]  = useState(null);
+  const [assignedAssets, setAssignedAssets] = useState([]);
+  const [actionLoading,  setActionLoading]  = useState(false);
+  const [showBulkConfirm,setShowBulkConfirm]= useState(false);
+  const [showCreate,     setShowCreate]     = useState(false);
+  const [createForm, setCreateForm] = useState({ employeeName:"", email:"", password:"", role:"Employee", departmentId:"", joinedDate:"" });
   const [createLoading, setCreateLoading] = useState(false);
   const [createError,   setCreateError]   = useState("");
 
   const deptMap = useMemo(() => {
-    const m = {};
-    departments.forEach(d => {
-      if (d.id != null) m[d.id] = d.departmentName || d.department_name || `Dept #${d.id}`;
-    });
+    const m={};
+    departments.forEach(d=>{ if(d.id!=null) m[d.id]=d.departmentName||d.department_name||`Dept #${d.id}`; });
     return m;
   }, [departments]);
 
+  // ── fetchAll: always filters out ids stored in deletedHistory ─────────────
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
@@ -824,26 +835,15 @@ function EmployeeManagementContent() {
       ]);
       const rawEmps  = Array.isArray(empRes.data)  ? empRes.data  : [];
       const rawDepts = Array.isArray(deptRes.data) ? deptRes.data : [];
-      // Filter out any IDs already in the local deleted-history so they stay hidden
-      setEmployees(prev => {
-        const deletedIds = new Set(
-          // read from the ref-like closure; we rely on the setState callback
-          // to get latest deletedEmployees via a functional update below
-          []
-        );
-        return rawEmps
-          .map(normaliseEmp)
-          .sort((a, b) => a.id - b.id);
-      });
-      // After setting raw employees, remove any that are in deleted history
-      setDeletedEmployees(del => {
-        const deletedIds = new Set(del.map(d => d.id));
-        setEmployees(rawEmps
-          .map(normaliseEmp)
-          .filter(e => !deletedIds.has(e.id))
-          .sort((a, b) => a.id - b.id));
-        return del; // keep history unchanged
-      });
+
+      // Read deleted IDs from ref (always current) and filter them out
+      const currentDeletedIds = new Set(deletedHistoryRef.current.map(d => Number(d.id)));
+      const activeEmps = rawEmps
+        .map(normaliseEmp)
+        .filter(e => !currentDeletedIds.has(Number(e.id)))
+        .sort((a,b) => a.id - b.id);
+
+      setEmployees(activeEmps);
       setDepartments(rawDepts);
     } catch (err) {
       toast.error("Load Failed", err.message || "Could not fetch data.");
@@ -855,30 +855,30 @@ function EmployeeManagementContent() {
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
   const stats = useMemo(() => ({
-    total:    employees.length,
-    active:   employees.filter(e => (e.status || "Active") === "Active").length,
-    removed:  employees.filter(e => e.status === "Removed").length,
-    admins:   employees.filter(e => e.role === "Admin").length,
+    total:   employees.length,
+    active:  employees.filter(e=>(e.status||"Active")==="Active").length,
+    removed: employees.filter(e=>e.status==="Removed").length,
+    admins:  employees.filter(e=>e.role==="Admin").length,
   }), [employees]);
 
   const filtered = useMemo(() => employees.filter(e => {
     const q = search.toLowerCase();
-    const matchQ = !q || (e.employeeName||"").toLowerCase().includes(q) || (e.email||"").toLowerCase().includes(q);
-    const matchR = filterRole   === "All" || e.role === filterRole;
-    const matchS = filterStatus === "All" || (e.status || "Active") === filterStatus;
-    const matchD = filterDept   === "All" || String(e.departmentId) === filterDept;
-    return matchQ && matchR && matchS && matchD;
+    const matchQ = !q||(e.employeeName||"").toLowerCase().includes(q)||(e.email||"").toLowerCase().includes(q);
+    const matchR = filterRole==="All"||e.role===filterRole;
+    const matchS = filterStatus==="All"||(e.status||"Active")===filterStatus;
+    const matchD = filterDept==="All"||String(e.departmentId)===filterDept;
+    return matchQ&&matchR&&matchS&&matchD;
   }), [employees, search, filterRole, filterStatus, filterDept]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(filtered.length/PAGE_SIZE));
   const paged      = filtered.slice((page-1)*PAGE_SIZE, page*PAGE_SIZE);
-  useEffect(() => { setPage(1); setSelected(new Set()); }, [search, filterRole, filterStatus, filterDept]);
+  useEffect(() => { setPage(1); setSelected(new Set()); }, [search,filterRole,filterStatus,filterDept]);
 
   const openView = async emp => {
     setViewEmp(emp); setAssignedAssets([]);
     try {
       const r = await api.get(`/api/asset-assignments/employee/${emp.id}`);
-      setAssignedAssets(Array.isArray(r.data) ? r.data : []);
+      setAssignedAssets(Array.isArray(r.data)?r.data:[]);
     } catch { setAssignedAssets([]); }
   };
 
@@ -886,92 +886,91 @@ function EmployeeManagementContent() {
     setActionLoading(true);
     try {
       const payload = {
-        employeeName:  form.employeeName,
-        employee_name: form.employeeName,
-        email:         form.email,
-        role:          form.role,
-        status:        form.status,
-        department: form.departmentId ? { id: Number(form.departmentId) } : null,
-        joinedDate: form.joinedDate || null,
+        employeeName:form.employeeName, employee_name:form.employeeName,
+        email:form.email, role:form.role, status:form.status,
+        department:form.departmentId?{id:Number(form.departmentId)}:null,
+        joinedDate:form.joinedDate||null,
       };
       if (form.password?.trim()) payload.password = form.password.trim();
-      await api.put(`/api/employees/${editEmp.id}`, payload, {
-        headers: { "X-Performed-By": getPerformedBy() },
-      });
+      await api.put(`/api/employees/${editEmp.id}`, payload, { headers:{"X-Performed-By":getPerformedBy()} });
       toast.success("Updated", `${form.employeeName} updated successfully.`);
       setEditEmp(null);
       await fetchAll();
-    } catch (err) {
-      toast.error("Update Failed", err.response?.data?.message || err.message);
-    } finally {
-      setActionLoading(false);
-    }
+    } catch(err) {
+      toast.error("Update Failed", err.response?.data?.message||err.message);
+    } finally { setActionLoading(false); }
   };
 
-  // ── SOFT DELETE: remove from active list → push to history ────────────────
+  // ── SOFT DELETE: save to localStorage, remove from active list ────────────
   const handleSoftDelete = () => {
     const target = softDeleteEmp;
     if (!target) return;
     setSoftDeleteEmp(null);
 
-    const performer = getPerformedBy();
-    const deletedEntry = {
+    const entry = {
       ...target,
       _deletedAt:  new Date().toISOString(),
-      _deletedBy:  performer,
+      _deletedBy:  getPerformedBy(),
       _deletedKey: `${target.id}-${Date.now()}`,
     };
 
-    // Instantly remove from active list
-    setEmployees(prev => prev.filter(e => e.id !== target.id));
-    // Add to history
-    setDeletedEmployees(prev => [deletedEntry, ...prev]);
+    // Remove from active list immediately
+    setEmployees(prev => prev.filter(e => Number(e.id) !== Number(target.id)));
 
-    toast.success("Removed", `${target.employeeName} moved to Deleted Employees history.`);
-  };
+    // Persist to localStorage history
+    setDeletedHistory(prev => {
+      const next = [entry, ...prev];
+      saveDeletedHistory(next); // immediate write for safety
+      return next;
+    });
 
-  // ── HARD DELETE: actually call backend DELETE + remove from history ────────
-  const handleHardDelete = async (target, closeModal) => {
-    setHardDeleteLoading(true);
-    try {
-      await api.delete(`/api/employees/${target.id}`, {
-        headers: { "X-Performed-By": getPerformedBy() },
-      });
-    } catch (err) {
-      // Even if backend fails (e.g. already gone), we still remove from local history
-      // but we warn the user
-      const status = err.response?.status;
-      if (status !== 404) {
-        toast.warning("Backend Note", `${target.employeeName} may still exist in DB: ${err.response?.data?.message || err.message}`);
-      }
-    } finally {
-      // Always remove from local history
-      setDeletedEmployees(prev => prev.filter(e => e._deletedKey !== target._deletedKey && e.id !== target.id));
-      toast.success("Permanently Deleted", `${target.employeeName} has been permanently deleted.`);
-      closeModal?.();
-      setHardDeleteLoading(false);
-    }
+    toast.success("Moved to History", `${target.employeeName} removed from active list and saved to history.`);
   };
 
   // ── BULK SOFT DELETE ──────────────────────────────────────────────────────
   const handleBulkSoftDelete = () => {
     const ids = [...selected];
-    const performer = getPerformedBy();
-    const now = new Date().toISOString();
-
+    const now  = new Date().toISOString();
+    const by   = getPerformedBy();
     const toBeMoved = employees.filter(e => ids.includes(e.id));
-    const entries = toBeMoved.map(emp => ({
+    const entries   = toBeMoved.map(emp => ({
       ...emp,
       _deletedAt:  now,
-      _deletedBy:  performer,
+      _deletedBy:  by,
       _deletedKey: `${emp.id}-${Date.now()}-${Math.random()}`,
     }));
-
     setEmployees(prev => prev.filter(e => !ids.includes(e.id)));
-    setDeletedEmployees(prev => [...entries, ...prev]);
+    setDeletedHistory(prev => {
+      const next = [...entries, ...prev];
+      saveDeletedHistory(next);
+      return next;
+    });
     setSelected(new Set());
     setShowBulkConfirm(false);
-    toast.success("Bulk Remove Done", `${ids.length} employee${ids.length>1?"s":""} moved to history.`);
+    toast.success("Bulk Removed", `${ids.length} employee${ids.length>1?"s":""} moved to history.`);
+  };
+
+  // ── HARD DELETE: call backend, then always remove from localStorage ────────
+  const handleHardDelete = async (target, closeModal) => {
+    setHardDeleteLoading(true);
+    try {
+      await api.delete(`/api/employees/${target.id}`, { headers:{"X-Performed-By":getPerformedBy()} });
+    } catch(err) {
+      const status = err.response?.status;
+      if (status !== 404) {
+        toast.warning("DB Note", `Backend: ${err.response?.data?.message||err.message}. Removing from history anyway.`);
+      }
+      // 404 means already gone from DB — treat as success
+    } finally {
+      setDeletedHistory(prev => {
+        const next = prev.filter(e => e._deletedKey !== target._deletedKey);
+        saveDeletedHistory(next);
+        return next;
+      });
+      toast.success("Permanently Deleted", `${target.employeeName} has been permanently removed.`);
+      closeModal?.();
+      setHardDeleteLoading(false);
+    }
   };
 
   const handleCreate = async () => {
@@ -987,70 +986,54 @@ function EmployeeManagementContent() {
     setCreateLoading(true);
     try {
       await api.post("/api/employees", {
-        employeeName:  employeeName.trim(),
-        employee_name: employeeName.trim(),
-        email:         email.trim(),
-        password,
-        role,
-        department:  { id: Number(departmentId) },
-        joinedDate:  createForm.joinedDate || null,
-      }, {
-        headers: { "X-Performed-By": getPerformedBy() },
-      });
+        employeeName:employeeName.trim(), employee_name:employeeName.trim(),
+        email:email.trim(), password, role,
+        department:{id:Number(departmentId)},
+        joinedDate:createForm.joinedDate||null,
+      }, { headers:{"X-Performed-By":getPerformedBy()} });
       toast.success("Employee Created", `${employeeName} added to the system.`);
       setShowCreate(false);
-      setCreateForm({ employeeName:"", email:"", password:"", role:"Employee", departmentId:"", joinedDate:"" });
+      setCreateForm({employeeName:"",email:"",password:"",role:"Employee",departmentId:"",joinedDate:""});
       await fetchAll();
-    } catch (err) {
-      const msg = err.response?.data?.message || err.message || "Create failed.";
+    } catch(err) {
+      const msg = err.response?.data?.message||err.message||"Create failed.";
       setCreateError(msg);
       toast.error("Create Failed", msg);
-    } finally {
-      setCreateLoading(false);
-    }
+    } finally { setCreateLoading(false); }
   };
 
   const exportCSV = () => {
-    const headers = ["ID","Name","Email","Role","Department","Status","Joined Date","Account Since"];
-    const rows = filtered.map(e => [
-      e.id, e.employeeName, e.email, e.role,
-      deptMap[e.departmentId]||"—",
-      e.status||"Active",
-      fmtDate(e.joinedDate),
-      fmtFull(e.createdAt),
-    ]);
-    const csv = [headers,...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
-    a.download = "employees.csv"; a.click(); URL.revokeObjectURL(a.href);
-    toast.success("Export Done", `${filtered.length} records exported.`);
+    const headers=["ID","Name","Email","Role","Department","Status","Joined Date","Account Since"];
+    const rows=filtered.map(e=>[e.id,e.employeeName,e.email,e.role,deptMap[e.departmentId]||"—",e.status||"Active",fmtDate(e.joinedDate),fmtFull(e.createdAt)]);
+    const csv=[headers,...rows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+    a.download="employees.csv"; a.click(); URL.revokeObjectURL(a.href);
+    toast.success("Export Done",`${filtered.length} records exported.`);
   };
 
-  const toggleSelect = id => setSelected(p => { const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n; });
+  const toggleSelect = id => setSelected(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n;});
   const toggleAll = () => {
-    if (paged.every(e => selected.has(e.id))) setSelected(p => { const n=new Set(p); paged.forEach(e=>n.delete(e.id)); return n; });
-    else setSelected(p => { const n=new Set(p); paged.forEach(e=>n.add(e.id)); return n; });
+    if (paged.every(e=>selected.has(e.id))) setSelected(p=>{const n=new Set(p);paged.forEach(e=>n.delete(e.id));return n;});
+    else setSelected(p=>{const n=new Set(p);paged.forEach(e=>n.add(e.id));return n;});
   };
-  const allPageSel  = paged.length>0 && paged.every(e=>selected.has(e.id));
-  const somePageSel = paged.some(e=>selected.has(e.id)) && !allPageSel;
+  const allPageSel  = paged.length>0&&paged.every(e=>selected.has(e.id));
+  const somePageSel = paged.some(e=>selected.has(e.id))&&!allPageSel;
+  const deptOptions = useMemo(()=>departments.map(d=>({id:d.id,name:d.departmentName||d.department_name||`Dept #${d.id}`})),[departments]);
 
-  const deptOptions = useMemo(() =>
-    departments.map(d => ({ id:d.id, name:d.departmentName||d.department_name||`Dept #${d.id}` })),
-  [departments]);
-
-  // ── RENDER ──────────────────────────────────────────────────────────────
+  // ── RENDER ──────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-5 pb-6">
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatCard icon="👥" label="Total Employees" value={stats.total}   sub="All registered users"  gradient="linear-gradient(135deg,#4f46e5,#7c3aed)" glowColor="rgba(79,70,229,.25)"  trend="All" />
-        <StatCard icon="✅" label="Active"           value={stats.active}  sub="Currently active"      gradient="linear-gradient(135deg,#059669,#0d9488)" glowColor="rgba(5,150,105,.25)"  trend="Live" />
-        <StatCard icon="🗂️" label="Deleted History"  value={deletedEmployees.length} sub="Soft-deleted records" gradient="linear-gradient(135deg,#dc2626,#f97316)" glowColor="rgba(220,38,38,.2)" trend={deletedEmployees.length > 0 ? "⚠" : "✓"} />
-        <StatCard icon="🔐" label="Admin Count"      value={stats.admins}  sub="Admin-level users"     gradient="linear-gradient(135deg,#7c3aed,#ec4899)" glowColor="rgba(124,58,237,.25)" trend="Admin" />
+        <StatCard icon="👥" label="Total Employees"  value={stats.total}            sub="All registered users"       gradient="linear-gradient(135deg,#4f46e5,#7c3aed)" glowColor="rgba(79,70,229,.25)"  trend="All" />
+        <StatCard icon="✅" label="Active"            value={stats.active}           sub="Currently active"           gradient="linear-gradient(135deg,#059669,#0d9488)" glowColor="rgba(5,150,105,.25)"  trend="Live" />
+        <StatCard icon="🗂️" label="Deleted History"   value={deletedHistory.length}  sub="Persisted across sessions"  gradient="linear-gradient(135deg,#dc2626,#f97316)" glowColor="rgba(220,38,38,.2)"   trend={deletedHistory.length>0?"⚠":"✓"} />
+        <StatCard icon="🔐" label="Admin Count"       value={stats.admins}           sub="Admin-level users"          gradient="linear-gradient(135deg,#7c3aed,#ec4899)" glowColor="rgba(124,58,237,.25)" trend="Admin" />
       </div>
 
-      {/* Search & Filters */}
+      {/* Filters */}
       <div className="bg-white rounded-2xl border border-indigo-50 p-4" style={{ boxShadow:"0 2px 12px rgba(79,70,229,.06)" }}>
         <div className="flex flex-col sm:flex-row gap-3 flex-wrap">
           <div className="relative flex-1 min-w-48">
@@ -1059,47 +1042,40 @@ function EmployeeManagementContent() {
               className="w-full pl-9 pr-4 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all" />
           </div>
           <select value={filterRole} onChange={e=>setFilterRole(e.target.value)} className="px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white text-slate-700 transition-all">
-            <option value="All">All Roles</option>
-            <option value="Admin">Admin</option>
-            <option value="Employee">Employee</option>
+            <option value="All">All Roles</option><option value="Admin">Admin</option><option value="Employee">Employee</option>
           </select>
           <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)} className="px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white text-slate-700 transition-all">
-            <option value="All">All Statuses</option>
-            <option value="Active">Active</option>
-            <option value="Inactive">Inactive</option>
-            <option value="Removed">Removed</option>
+            <option value="All">All Statuses</option><option value="Active">Active</option><option value="Inactive">Inactive</option><option value="Removed">Removed</option>
           </select>
           <select value={filterDept} onChange={e=>setFilterDept(e.target.value)} className="px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400 bg-white text-slate-700 transition-all">
             <option value="All">All Departments</option>
-            {deptOptions.map(d => <option key={d.id} value={String(d.id)}>{d.name}</option>)}
+            {deptOptions.map(d=><option key={d.id} value={String(d.id)}>{d.name}</option>)}
           </select>
           <button onClick={exportCSV} className="px-4 py-2.5 rounded-xl text-sm font-semibold text-emerald-700 border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 transition-colors flex items-center gap-2 whitespace-nowrap">📥 CSV</button>
-          {/* Toggle deleted panel */}
-          <button
-            onClick={() => setShowDeletedPanel(p => !p)}
-            className={`px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 whitespace-nowrap border transition-all ${showDeletedPanel ? "bg-red-100 text-red-700 border-red-300" : "bg-red-50 text-red-600 border-red-200 hover:bg-red-100"}`}>
-            🗂️ {showDeletedPanel ? "Hide" : "View"} Deleted
-            {deletedEmployees.length > 0 && (
+          <button onClick={()=>setShowDeletedPanel(p=>!p)}
+            className={`px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 whitespace-nowrap border transition-all ${showDeletedPanel?"bg-red-100 text-red-700 border-red-300":"bg-red-50 text-red-600 border-red-200 hover:bg-red-100"}`}>
+            🗂️ {showDeletedPanel?"Hide":"View"} Deleted
+            {deletedHistory.length>0 && (
               <span className="text-xs font-bold text-white px-1.5 py-0.5 rounded-full" style={{ background:"linear-gradient(135deg,#ef4444,#dc2626)", minWidth:20, textAlign:"center" }}>
-                {deletedEmployees.length}
+                {deletedHistory.length}
               </span>
             )}
           </button>
-          <button onClick={() => setShowCreate(true)} className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white flex items-center gap-2 whitespace-nowrap transition-all hover:shadow-lg" style={{ background:"linear-gradient(90deg,#4f46e5,#7c3aed)", boxShadow:"0 4px 14px rgba(79,70,229,.3)" }}>＋ New Employee</button>
+          <button onClick={()=>setShowCreate(true)} className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white flex items-center gap-2 whitespace-nowrap transition-all hover:shadow-lg" style={{ background:"linear-gradient(90deg,#4f46e5,#7c3aed)", boxShadow:"0 4px 14px rgba(79,70,229,.3)" }}>＋ New Employee</button>
         </div>
         {selected.size > 0 && (
           <div className="flex items-center gap-3 mt-3 p-3 bg-amber-50 border border-amber-200 rounded-xl">
             <span className="text-xs font-semibold text-amber-700">{selected.size} selected</span>
-            <button onClick={() => setShowBulkConfirm(true)} className="ml-auto text-xs font-bold text-white px-3 py-1.5 rounded-lg" style={{ background:"linear-gradient(90deg,#f59e0b,#d97706)" }}>🗂️ Move to History</button>
-            <button onClick={() => setSelected(new Set())} className="text-xs text-amber-500 hover:text-amber-700 font-medium">Clear</button>
+            <button onClick={()=>setShowBulkConfirm(true)} className="ml-auto text-xs font-bold text-white px-3 py-1.5 rounded-lg" style={{ background:"linear-gradient(90deg,#f59e0b,#d97706)" }}>🗂️ Move to History</button>
+            <button onClick={()=>setSelected(new Set())} className="text-xs text-amber-500 hover:text-amber-700 font-medium">Clear</button>
           </div>
         )}
       </div>
 
-      {/* ── DELETED EMPLOYEES PANEL ── */}
+      {/* ── DELETED HISTORY PANEL ── */}
       {showDeletedPanel && (
         <DeletedEmployeesTable
-          deletedEmployees={deletedEmployees}
+          deletedHistory={deletedHistory}
           deptMap={deptMap}
           onHardDelete={handleHardDelete}
           hardDeleteLoading={hardDeleteLoading}
@@ -1117,15 +1093,15 @@ function EmployeeManagementContent() {
             <thead>
               <tr style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
                 <th className="px-3 py-3 w-8"><Checkbox checked={allPageSel} onChange={toggleAll} indeterminate={somePageSel} /></th>
-                {["#","Employee","Email","Password","Role","Department","Status","Joined Date","Account Since","Actions"].map(h => (
+                {["#","Employee","Email","Password","Role","Department","Status","Joined Date","Account Since","Actions"].map(h=>(
                   <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading
-                ? Array.from({length:6}).map((_,i) => <SkeletonRow key={i} />)
-                : paged.length === 0
+                ? Array.from({length:6}).map((_,i)=><SkeletonRow key={i} />)
+                : paged.length===0
                   ? <tr><td colSpan={11} className="px-5 py-16 text-center">
                       <div className="flex flex-col items-center gap-3">
                         <span className="text-4xl">🔍</span>
@@ -1133,24 +1109,14 @@ function EmployeeManagementContent() {
                         <p className="text-xs text-slate-300">Try adjusting your filters</p>
                       </div>
                     </td></tr>
-                  : paged.map((emp, idx) => {
-                      const isChecked = selected.has(emp.id);
-                      const deptName = deptMap[emp.departmentId] || emp.departmentName || "—";
-                      const rowBg = isChecked
-                        ? "rgba(238,242,255,0.9)"
-                        : idx % 2 === 1 ? "rgba(248,250,252,0.7)" : "white";
+                  : paged.map((emp,idx)=>{
+                      const isChecked=selected.has(emp.id);
+                      const deptName=deptMap[emp.departmentId]||emp.departmentName||"—";
+                      const rowBg=isChecked?"rgba(238,242,255,0.9)":idx%2===1?"rgba(248,250,252,0.7)":"white";
                       return (
-                        <tr key={emp.id}
-                          className="transition-colors border-b border-slate-50/80 hover:bg-indigo-50/40 group"
-                          style={{ background: rowBg }}>
+                        <tr key={emp.id} className="transition-colors border-b border-slate-50/80 hover:bg-indigo-50/40" style={{ background:rowBg }}>
                           <td className="px-3 py-3.5"><Checkbox checked={isChecked} onChange={()=>toggleSelect(emp.id)} /></td>
-
-                          {/* ID */}
-                          <td className="px-3 py-3.5">
-                            <span className="text-xs font-mono font-bold text-indigo-400 bg-indigo-50 px-2 py-0.5 rounded-md">#{emp.id}</span>
-                          </td>
-
-                          {/* Profile */}
+                          <td className="px-3 py-3.5"><span className="text-xs font-mono font-bold text-indigo-400 bg-indigo-50 px-2 py-0.5 rounded-md">#{emp.id}</span></td>
                           <td className="px-3 py-3.5">
                             <div className="flex items-center gap-2.5">
                               <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-xs font-black flex-shrink-0 shadow-sm" style={{ background:avatarColor(emp.employeeName||"") }}>
@@ -1162,65 +1128,35 @@ function EmployeeManagementContent() {
                               </div>
                             </div>
                           </td>
-
-                          {/* Email */}
+                          <td className="px-3 py-3.5"><span className="text-xs text-slate-500 whitespace-nowrap">{emp.email||"—"}</span></td>
                           <td className="px-3 py-3.5">
-                            <span className="text-xs text-slate-500 whitespace-nowrap">{emp.email||"—"}</span>
+                            {emp.password?<span className="text-slate-300 font-mono tracking-widest text-xs">••••••</span>:<span className="text-slate-200 italic text-xs">not set</span>}
                           </td>
-
-                          {/* Password */}
-                          <td className="px-3 py-3.5">
-                            {emp.password
-                              ? <span className="text-slate-300 font-mono tracking-widest text-xs">••••••</span>
-                              : <span className="text-slate-200 italic text-xs">not set</span>}
-                          </td>
-
-                          {/* Role — fixed horizontal layout */}
                           <td className="px-3 py-3.5"><RoleBadge role={emp.role||"Employee"} /></td>
-
-                          {/* Department */}
                           <td className="px-3 py-3.5">
                             <span className="inline-flex items-center gap-1 text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100 px-2 py-0.5 rounded-lg whitespace-nowrap">
                               🏢 {deptName}
                             </span>
                           </td>
-
-                          {/* Status */}
                           <td className="px-3 py-3.5"><StatusBadge status={emp.status||"Active"} /></td>
-
-                          {/* Joined Date */}
                           <td className="px-3 py-3.5 whitespace-nowrap">
-                            {emp.joinedDate ? (
-                              <span className="inline-flex items-center gap-1 text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-100 px-2 py-0.5 rounded-lg">
-                                📅 {fmtDate(emp.joinedDate)}
-                              </span>
-                            ) : (
-                              <span className="text-slate-300 italic text-xs">Not set</span>
-                            )}
+                            {emp.joinedDate
+                              ? <span className="inline-flex items-center gap-1 text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-100 px-2 py-0.5 rounded-lg">📅 {fmtDate(emp.joinedDate)}</span>
+                              : <span className="text-slate-300 italic text-xs">Not set</span>}
                           </td>
-
-                          {/* Account Since */}
                           <td className="px-3 py-3.5 whitespace-nowrap">
-                            {emp.createdAt ? (
-                              <div>
-                                <p className="text-xs font-medium text-slate-600">{fmtDate(emp.createdAt)}</p>
-                                <p className="text-xs text-slate-300" style={{fontSize:"10px"}}>{fmtFull(emp.createdAt).split(",")[1]?.trim() || ""}</p>
-                              </div>
-                            ) : (
-                              <span className="text-slate-300 italic text-xs">—</span>
-                            )}
+                            {emp.createdAt
+                              ? <div>
+                                  <p className="text-xs font-medium text-slate-600">{fmtDate(emp.createdAt)}</p>
+                                  <p className="text-xs text-slate-300" style={{fontSize:"10px"}}>{fmtFull(emp.createdAt).split(",")[1]?.trim()||""}</p>
+                                </div>
+                              : <span className="text-slate-300 italic text-xs">—</span>}
                           </td>
-
-                          {/* Actions */}
                           <td className="px-3 py-3.5">
                             <div className="flex items-center gap-1.5">
-                              <button onClick={()=>openView(emp)} title="View Details"
-                                className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-indigo-100 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">👁</button>
-                              <button onClick={()=>setEditEmp(emp)} title="Edit Employee"
-                                className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-violet-100 bg-violet-50 text-violet-600 hover:bg-violet-100 transition-colors">✏️</button>
-                              {/* Soft-delete button — no "Cannot delete" error */}
-                              <button onClick={()=>setSoftDeleteEmp(emp)} title="Remove Employee"
-                                className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-red-100 bg-red-50 text-red-500 hover:bg-red-100 transition-colors">🗑️</button>
+                              <button onClick={()=>openView(emp)} title="View" className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-indigo-100 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">👁</button>
+                              <button onClick={()=>setEditEmp(emp)} title="Edit" className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-violet-100 bg-violet-50 text-violet-600 hover:bg-violet-100 transition-colors">✏️</button>
+                              <button onClick={()=>setSoftDeleteEmp(emp)} title="Remove" className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-red-100 bg-red-50 text-red-500 hover:bg-red-100 transition-colors">🗑️</button>
                             </div>
                           </td>
                         </tr>
@@ -1230,15 +1166,13 @@ function EmployeeManagementContent() {
             </tbody>
           </table>
         </div>
-
-        {/* Pagination */}
         {!loading && filtered.length > PAGE_SIZE && (
           <div className="flex items-center justify-between px-5 py-3 border-t border-indigo-50">
             <span className="text-xs text-slate-400">Page {page} of {totalPages} · {filtered.length} total</span>
             <div className="flex items-center gap-1">
               <button onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={page===1} className="w-7 h-7 rounded-lg text-xs border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">←</button>
               {Array.from({length:Math.min(5,totalPages)}).map((_,i)=>{
-                const pg = Math.max(1,Math.min(page-2,totalPages-4))+i;
+                const pg=Math.max(1,Math.min(page-2,totalPages-4))+i;
                 if(pg<1||pg>totalPages) return null;
                 return (
                   <button key={pg} onClick={()=>setPage(pg)}
@@ -1257,14 +1191,7 @@ function EmployeeManagementContent() {
       {/* MODALS */}
       {viewEmp      && <ViewModal employee={viewEmp} deptMap={deptMap} assignedAssets={assignedAssets} onClose={()=>setViewEmp(null)} />}
       {editEmp      && <EditModal employee={editEmp} departments={departments} onSave={handleEdit} onClose={()=>setEditEmp(null)} loading={actionLoading} />}
-      {softDeleteEmp && (
-        <ConfirmSoftDeleteModal
-          employee={softDeleteEmp}
-          onConfirm={handleSoftDelete}
-          onCancel={() => setSoftDeleteEmp(null)}
-          loading={actionLoading}
-        />
-      )}
+      {softDeleteEmp && <ConfirmSoftDeleteModal employee={softDeleteEmp} onConfirm={handleSoftDelete} onCancel={()=>setSoftDeleteEmp(null)} />}
 
       {/* Bulk soft-delete confirm */}
       {showBulkConfirm && createPortal(
@@ -1272,18 +1199,18 @@ function EmployeeManagementContent() {
           <div className="bg-white rounded-3xl w-full max-w-sm p-6 shadow-2xl text-center">
             <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background:"linear-gradient(135deg,#fef3c7,#fde68a)" }}><span className="text-3xl">🗂️</span></div>
             <h3 className="text-lg font-bold text-slate-900 mb-2">Move {selected.size} Employee{selected.size>1?"s":""} to History?</h3>
-            <p className="text-sm text-slate-500 mb-6">Selected employees will be removed from the active list and stored in Deleted Employees history. You can permanently delete them from there.</p>
+            <p className="text-sm text-slate-500 mb-6">They'll be removed from the active list and stored in Deleted History. Permanently delete them from there anytime.</p>
             <div className="flex gap-3">
-              <button onClick={()=>setShowBulkConfirm(false)} disabled={bulkDelLoading} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-colors">Cancel</button>
-              <button onClick={handleBulkSoftDelete} disabled={bulkDelLoading} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white disabled:opacity-50 flex items-center justify-center gap-2" style={{ background:"linear-gradient(135deg,#f59e0b,#d97706)" }}>
-                {bulkDelLoading?<><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Moving…</>:"🗂️ Confirm"}
+              <button onClick={()=>setShowBulkConfirm(false)} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors">Cancel</button>
+              <button onClick={handleBulkSoftDelete} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white flex items-center justify-center gap-2" style={{ background:"linear-gradient(135deg,#f59e0b,#d97706)" }}>
+                🗂️ Confirm
               </button>
             </div>
           </div>
         </div>, document.body
       )}
 
-      {/* Create Employee panel */}
+      {/* Create Employee */}
       {showCreate && createPortal(
         <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4" style={{ background:"rgba(15,10,40,0.75)", backdropFilter:"blur(6px)" }} onClick={()=>setShowCreate(false)}>
           <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl max-h-[92vh] flex flex-col" onClick={e=>e.stopPropagation()}>
@@ -1300,7 +1227,7 @@ function EmployeeManagementContent() {
                 {label:"Name *",     key:"employeeName", type:"text",     ph:"e.g. Priya Nair"},
                 {label:"Email *",    key:"email",        type:"email",    ph:"priya@company.com"},
                 {label:"Password *", key:"password",     type:"password", ph:"Min. 6 characters"},
-              ].map(f => (
+              ].map(f=>(
                 <div key={f.key}>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">{f.label}</label>
                   <input type={f.type} value={createForm[f.key]} placeholder={f.ph}
@@ -1331,7 +1258,8 @@ function EmployeeManagementContent() {
             </div>
             <div className="flex gap-3 px-6 pb-6 flex-shrink-0">
               <button onClick={()=>setShowCreate(false)} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors">Cancel</button>
-              <button onClick={handleCreate} disabled={createLoading} className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white disabled:opacity-50 flex items-center justify-center gap-2 transition-all"
+              <button onClick={handleCreate} disabled={createLoading}
+                className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white disabled:opacity-50 flex items-center justify-center gap-2 transition-all"
                 style={{ background:"linear-gradient(90deg,#4f46e5,#9333ea,#ec4899)", boxShadow:"0 4px 14px rgba(79,70,229,.4)" }}>
                 {createLoading?<><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Creating…</>:"＋ Create Employee"}
               </button>
@@ -1354,30 +1282,28 @@ function AdminEmployeeInner() {
 
   useEffect(() => {
     Promise.all([api.get("/api/assets"), api.get("/api/maintenance")])
-      .then(([a, m]) => {
-        setNotifAssets(Array.isArray(a.data) ? a.data : []);
-        setNotifMaint(Array.isArray(m.data)  ? m.data  : []);
+      .then(([a,m]) => {
+        setNotifAssets(Array.isArray(a.data)?a.data:[]);
+        setNotifMaint(Array.isArray(m.data)?m.data:[]);
       })
-      .catch(() => {});
+      .catch(()=>{});
   }, []);
 
-  const assetMap = useMemo(() => {
-    const m = {};
-    notifAssets.forEach(a => { if (a.id != null) m[a.id] = a.assetName ?? a.asset_name ?? `Asset #${a.id}`; });
+  const assetMap = useMemo(()=>{
+    const m={};
+    notifAssets.forEach(a=>{if(a.id!=null) m[a.id]=a.assetName??a.asset_name??`Asset #${a.id}`;});
     return m;
-  }, [notifAssets]);
+  },[notifAssets]);
 
-  const notifications = useMemo(() =>
-    buildNotifications(notifAssets, notifMaint, assetMap),
-  [notifAssets, notifMaint, assetMap]);
+  const notifications = useMemo(()=>buildNotifications(notifAssets,notifMaint,assetMap),[notifAssets,notifMaint,assetMap]);
 
   if (user.role !== "Admin") return <AccessDenied />;
 
   return (
     <div className="flex min-h-screen" style={{ background:"linear-gradient(135deg,#f0f0ff 0%,#f5f9ff 50%,#f0fff8 100%)" }}>
-      <Sidebar mobileOpen={open} onClose={() => setOpen(false)} />
+      <Sidebar mobileOpen={open} onClose={()=>setOpen(false)} />
       <div className="flex flex-col flex-1 min-w-0">
-        <Navbar onMenuToggle={() => setOpen(o => !o)} notifications={notifications} />
+        <Navbar onMenuToggle={()=>setOpen(o=>!o)} notifications={notifications} />
         <main className="flex-1 p-3 sm:p-4 lg:p-6 overflow-auto">
           <EmployeeManagementContent />
         </main>
