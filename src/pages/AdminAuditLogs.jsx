@@ -1,40 +1,37 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// AdminAuditLogs.jsx  —  FULLY UPDATED v5
+// AdminAuditLogs.jsx  —  FULLY UPDATED v6
 // ═══════════════════════════════════════════════════════════════════════════
 // ALL FIXES IN THIS VERSION:
 //
 // [FIX-1] TIMESTAMP — real action time, IST timezone, no mismatch
 //         • fmtFull() uses timeZone:"Asia/Kolkata" consistently
-//         • Soft-delete entries from AdminEmployeeManagement use _deletedAt
-//           which is new Date().toISOString() at exact action time
-//         • No cached/stale times used anywhere
+//         • timeAgo() uses live Date.now() — never stale
 //
 // [FIX-2] RELATIVE TIME — accurate + auto-updating every 60s
-//         • setInterval tick forces re-render every 60 s
-//         • timeAgo() recalculates from Date.now() each render
+//         • Single shared "now" state updated by setInterval in root component
+//         • Passed as prop so all children re-render on tick
 //         • "Just now" < 60s, "X min ago", "X hr ago", date fallback
 //
 // [FIX-3] DELETE AUDIT LOG RECORDS — permanent delete from audit table
-//         • Each audit row has a 🗑️ Delete button
-//         • Calls DELETE /api/audit-logs/:id (or removes locally if 404)
 //         • Confirmation dialog before permanent removal
+//         • Removes locally even if backend returns 404
 //
 // [FIX-4] DELETE COUNT from AdminEmployeeManagement reflected correctly
-//         • Reads localStorage "deletedEmployees" on mount + storage event
-//         • Stat card "Deleted (Session)" shows count from localStorage
-//         • Analytics panel counts reflect both server logs + local deletes
 //
 // [FIX-5] COLORFUL ANALYTICS — vibrant gradients, charts, glowing cards
-//         • Each metric card has unique gradient + glow
-//         • Bar chart replaced with segmented color bars
-//         • Recent actions feed uses colored left-border cards
-//         • Action breakdown donut-style progress rings
 //
-// [FIX-6] VIEW MODAL — white text fix + action highlight
-//         • "Performed By" section header text is now white (was green-on-green)
-//         • Action type shown as large coloured badge at top of modal
-//         • "What was changed" section highlights the action clearly
-//         • CREATE / UPDATE / DELETE each have distinct coloured callout
+// [FIX-6] VIEW MODAL — only opens on "View →" button, NOT on row click
+//         • Row click no longer opens modal (was triggering on desc/name)
+//         • Only explicit "View →" button opens detail modal
+//
+// [FIX-7] "All" period in Analytics → Recent Actions now displays correctly
+//         • Was filtering with periodStart = new Date(0) which works, but
+//           the slice(0,10) + sort was correct — fixed rendering guard
+//         • Added explicit empty-state per period label
+//
+// [FIX-8] Timestamp written at EXACT action moment
+//         • All local history entries use new Date().toISOString() at call time
+//         • No stale createdAt / joinedDate reuse anywhere
 // ═══════════════════════════════════════════════════════════════════════════
 
 import {
@@ -49,7 +46,7 @@ import axios from "axios";
 const api = axios.create({
   baseURL: "https://assest-management-system.onrender.com/",
   headers: { "Content-Type": "application/json", Accept: "application/json" },
-  timeout: 15000,
+  timeout: 30000,
 });
 
 // ─── Nav ──────────────────────────────────────────────────────────────────────
@@ -83,21 +80,29 @@ function getDashboardLabel(u) {
   return r ? `${r} Dashboard` : "Dashboard";
 }
 
-// [FIX-1] All timestamps use IST (Asia/Kolkata) — no mismatch
+// ─────────────────────────────────────────────────────────────────────────────
+// [FIX-1] ALL timestamps use IST (Asia/Kolkata) — no UTC mismatch
+// ─────────────────────────────────────────────────────────────────────────────
 function fmtFull(ts) {
   if (!ts) return "—";
-  const dt = new Date(ts);
+  // Handle Firebase Timestamp objects (with .toDate()) and plain strings/numbers
+  const dt = ts?.toDate ? ts.toDate() : new Date(ts);
   if (isNaN(dt.getTime())) return "—";
   return dt.toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    day: "2-digit", month: "short", year: "numeric",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hour12: true,
+    timeZone:  "Asia/Kolkata",
+    day:       "2-digit",
+    month:     "short",
+    year:      "numeric",
+    hour:      "2-digit",
+    minute:    "2-digit",
+    second:    "2-digit",
+    hour12:    true,
   });
 }
+
 function fmtDate(d) {
   if (!d) return "—";
-  const dt = new Date(d);
+  const dt = d?.toDate ? d.toDate() : new Date(d);
   if (isNaN(dt.getTime())) return "—";
   return dt.toLocaleDateString("en-IN", {
     timeZone: "Asia/Kolkata",
@@ -105,25 +110,38 @@ function fmtDate(d) {
   });
 }
 
-// [FIX-2] Relative time — recalculates from Date.now() each call
-// Called inside components that re-render every 60s via setInterval tick
-function timeAgo(ts) {
+// ─────────────────────────────────────────────────────────────────────────────
+// [FIX-2] Relative time — accepts `now` as param so callers control freshness
+//         "now" is updated by a shared setInterval every 60s at the root level
+// ─────────────────────────────────────────────────────────────────────────────
+function timeAgo(ts, now = Date.now()) {
   if (!ts) return "—";
-  const dt = new Date(ts);
+  const dt = ts?.toDate ? ts.toDate() : new Date(ts);
   if (isNaN(dt.getTime())) return "—";
-  const diff = (Date.now() - dt.getTime()) / 1000; // seconds
-  if (diff < 5)    return "Just now";
-  if (diff < 60)   return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) {
-    const m = Math.floor(diff / 60);
+
+  // [FIX-8] Debug in dev — uncomment to verify timestamps
+  // console.log("Raw ts:", ts, "Parsed:", dt, "Now:", new Date(now), "Diff(s):", (now - dt.getTime()) / 1000);
+
+  const diffSec = (now - dt.getTime()) / 1000;
+  if (diffSec < 5)     return "Just now";
+  if (diffSec < 60)    return `${Math.floor(diffSec)}s ago`;
+  if (diffSec < 3600)  {
+    const m = Math.floor(diffSec / 60);
     return `${m} min${m > 1 ? "s" : ""} ago`;
   }
-  if (diff < 86400) {
-    const h = Math.floor(diff / 3600);
+  if (diffSec < 86400) {
+    const h = Math.floor(diffSec / 3600);
     return `${h} hr${h > 1 ? "s" : ""} ago`;
   }
-  if (diff < 172800) return "Yesterday";
+  if (diffSec < 172800) return "Yesterday";
   return fmtDate(ts);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [FIX-8] Get current IST timestamp string — use THIS for every action write
+// ─────────────────────────────────────────────────────────────────────────────
+function nowISO() {
+  return new Date().toISOString();
 }
 
 function actionCategory(action = "") {
@@ -203,7 +221,6 @@ function buildNotifications(assets, maint, assetMap) {
   return n;
 }
 
-// ─── normaliseEmp ─────────────────────────────────────────────────────────────
 function normaliseEmp(e) {
   const deptId = e.department?.id ?? e.departmentId ?? e.department_id ?? null;
   const deptNameFromObj = e.department?.departmentName ?? e.department?.department_name ?? null;
@@ -219,7 +236,6 @@ function normaliseEmp(e) {
   };
 }
 
-// ─── Avatar helpers ───────────────────────────────────────────────────────────
 const AV_COLORS = [
   "linear-gradient(135deg,#4f46e5,#7c3aed)",
   "linear-gradient(135deg,#0d9488,#14b8a6)",
@@ -231,7 +247,6 @@ const AV_COLORS = [
 function avatarColor(name) { return AV_COLORS[((name||"A").charCodeAt(0)) % AV_COLORS.length]; }
 function empInitials(name) { return (name||"?").split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2); }
 
-// ─── Read soft-deleted history from localStorage ──────────────────────────────
 function loadDeletedHistory() {
   try { const r = localStorage.getItem("deletedEmployees"); return r ? JSON.parse(r) : []; }
   catch { return []; }
@@ -248,6 +263,7 @@ const T_CFG = {
   warning:{ icon:"⚠️", bar:"linear-gradient(90deg,#f59e0b,#fcd34d)", border:"rgba(245,158,11,0.35)", bg:"rgba(255,251,235,0.98)", glow:"0 0 0 1px rgba(245,158,11,0.2),0 20px 60px rgba(245,158,11,0.15),0 4px 16px rgba(0,0,0,0.12)", titleC:"#78350f", msgC:"#92400e", iconBg:"linear-gradient(135deg,#f59e0b,#d97706)", tagBg:"rgba(245,158,11,0.12)", tagC:"#b45309", tag:"WARNING", dur:5000 },
   info:   { icon:"ℹ️", bar:"linear-gradient(90deg,#4f46e5,#818cf8)", border:"rgba(79,70,229,0.35)", bg:"rgba(245,243,255,0.98)", glow:"0 0 0 1px rgba(79,70,229,0.2),0 20px 60px rgba(79,70,229,0.15),0 4px 16px rgba(0,0,0,0.12)", titleC:"#1e1b4b", msgC:"#3730a3", iconBg:"linear-gradient(135deg,#4f46e5,#7c3aed)", tagBg:"rgba(79,70,229,0.12)", tagC:"#4338ca", tag:"INFO", dur:4000 },
 };
+
 function ToastCard({ t, remove }) {
   const c = T_CFG[t.type] ?? T_CFG.info;
   const [vis, setVis] = useState(false), [w, setW] = useState(100);
@@ -279,30 +295,51 @@ function ToastCard({ t, remove }) {
     </div>
   );
 }
+
 function ToastContainer({ toasts, remove }) {
   const isMob = window.innerWidth<640;
   return createPortal(
     <div style={{ position:"fixed", zIndex:99999, pointerEvents:"none", display:"flex", flexDirection:"column", gap:10, ...(isMob?{bottom:16,left:12,right:12}:{top:72,right:20,width:380,alignItems:"flex-end"}) }}>
-      {toasts.map(t=><ToastCard key={t.id} t={t} remove={remove} />)}
+      {toasts.map(t=><ToastCard key={t.id} t={t} remove={remove}/>)}
     </div>, document.body
   );
 }
+
 function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
-  const add = useCallback((type,title,message)=>{ const id=Date.now()+Math.random(); setToasts(p=>{ const n=[...p,{id,type,title,message}]; return n.length>4?n.slice(-4):n; }); },[]);
+  const add = useCallback((type,title,message)=>{
+    const id=Date.now()+Math.random();
+    setToasts(p=>{ const n=[...p,{id,type,title,message}]; return n.length>4?n.slice(-4):n; });
+  },[]);
   const remove = useCallback(id=>setToasts(p=>p.filter(t=>t.id!==id)),[]);
-  const toast = useMemo(()=>({ success:(t,m)=>add("success",t,m), error:(t,m)=>add("error",t,m), warning:(t,m)=>add("warning",t,m), info:(t,m)=>add("info",t,m) }),[add]);
+  const toast = useMemo(()=>({
+    success:(t,m)=>add("success",t,m),
+    error:(t,m)=>add("error",t,m),
+    warning:(t,m)=>add("warning",t,m),
+    info:(t,m)=>add("info",t,m),
+  }),[add]);
   return (<ToastCtx.Provider value={{toast}}>{children}<ToastContainer toasts={toasts} remove={remove}/></ToastCtx.Provider>);
 }
 
 // ─── NOTIFICATION DROPDOWN ────────────────────────────────────────────────────
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
-  const TS = { critical:{iconBg:"bg-red-100",dot:"bg-red-500",title:"text-red-700"}, warning:{iconBg:"bg-amber-100",dot:"bg-amber-500",title:"text-amber-700"}, info:{iconBg:"bg-indigo-100",dot:"bg-indigo-400",title:"text-indigo-700"} };
-  const isMobile = window.innerWidth<480;
-  const topOffset = (anchorRect?.bottom??60)+8;
-  const style = isMobile
-    ? { position:"fixed",top:topOffset,left:12,right:12,zIndex:9999,background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)",border:"1px solid rgba(79,70,229,.1)" }
-    : { position:"fixed",top:topOffset,right:Math.max(8,window.innerWidth-(anchorRect?.right??60)),width:320,zIndex:9999,background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)",border:"1px solid rgba(79,70,229,.1)" };
+  const TS = {
+    critical:{iconBg:"bg-red-100",dot:"bg-red-500",title:"text-red-700"},
+    warning: {iconBg:"bg-amber-100",dot:"bg-amber-500",title:"text-amber-700"},
+    info:    {iconBg:"bg-indigo-100",dot:"bg-indigo-400",title:"text-indigo-700"},
+  };
+  const screenW = window.innerWidth;
+  const MARGIN  = 8;
+  const dropW   = Math.min(300, screenW - MARGIN * 2);
+  const bellRight = anchorRect ? anchorRect.right : screenW - MARGIN;
+  const computedLeft = Math.max(MARGIN, bellRight - dropW);
+
+  const style = {
+    position:"fixed", top:(anchorRect?.bottom??60)+8, left:computedLeft, width:dropW,
+    zIndex:9999, background:"#fff", borderRadius:16, overflow:"hidden",
+    boxShadow:"0 24px 60px rgba(79,70,229,.22),0 4px 16px rgba(0,0,0,.12)",
+    border:"1px solid rgba(79,70,229,.1)",
+  };
   return createPortal(<>
     <div style={{position:"fixed",inset:0,zIndex:9998}} onClick={onClose}/>
     <div style={style}>
@@ -319,7 +356,10 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
             <div key={n.id} className="flex gap-3 px-4 py-3 border-b border-slate-50 hover:bg-slate-50 transition-colors cursor-default">
               <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0 ${s.iconBg}`}>{n.icon}</div>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between gap-1 mb-0.5"><span className={`text-xs font-bold truncate ${s.title}`}>{n.title}</span><span className="text-xs text-slate-300 flex-shrink-0 ml-2">{n.time}</span></div>
+                <div className="flex items-center justify-between gap-1 mb-0.5">
+                  <span className={`text-xs font-bold truncate ${s.title}`}>{n.title}</span>
+                  <span className="text-xs text-slate-300 flex-shrink-0 ml-2">{n.time}</span>
+                </div>
                 <p className="text-xs text-slate-500 leading-relaxed">{n.message}</p>
               </div>
               <span className={`w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ${s.dot}`}/>
@@ -339,26 +379,40 @@ function SidebarContent({ onNavigate }) {
   const go = p => { navigate(p); onNavigate?.(); };
   const NavBtn = ({ item }) => {
     const on = location.pathname===item.path||(item.path!=="/dashboard"&&location.pathname.startsWith(item.path));
-    return (<button onClick={()=>go(item.path)} className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative ${on?"text-white":"text-indigo-300 hover:text-indigo-100 hover:bg-white/5"}`} style={on?{background:"linear-gradient(90deg,rgba(99,102,241,.5),rgba(20,184,166,.3))",boxShadow:"0 0 20px rgba(99,102,241,.3)"}:{}}>
-      {on&&<span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full" style={{background:"linear-gradient(180deg,#818cf8,#34d399)"}}/>}
-      <span className="text-sm w-4 text-center">{item.icon}</span><span className="flex-1">{item.label}</span>
-    </button>);
+    return (
+      <button onClick={()=>go(item.path)}
+        className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative ${on?"text-white":"text-indigo-300 hover:text-indigo-100 hover:bg-white/5"}`}
+        style={on?{background:"linear-gradient(90deg,rgba(99,102,241,.5),rgba(20,184,166,.3))",boxShadow:"0 0 20px rgba(99,102,241,.3)"}:{}}>
+        {on&&<span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full" style={{background:"linear-gradient(180deg,#818cf8,#34d399)"}}/>}
+        <span className="text-sm w-4 text-center">{item.icon}</span>
+        <span className="flex-1">{item.label}</span>
+      </button>
+    );
   };
-  return (<div className="flex flex-col h-full py-6 px-3.5">
-    <div className="flex items-center gap-2.5 px-2 mb-8 cursor-pointer" onClick={()=>go("/dashboard")}>
-      <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{background:"linear-gradient(135deg,#818cf8,#34d399)"}}>⚙</div>
-      <div><div className="text-white font-bold text-base tracking-tight">AssetAI</div><div className="text-indigo-300 font-medium tracking-widest uppercase" style={{fontSize:9}}>Management Suite</div></div>
+  return (
+    <div className="flex flex-col h-full py-6 px-3.5">
+      <div className="flex items-center gap-2.5 px-2 mb-8 cursor-pointer" onClick={()=>go("/dashboard")}>
+        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{background:"linear-gradient(135deg,#818cf8,#34d399)"}}>⚙</div>
+        <div>
+          <div className="text-white font-bold text-base tracking-tight">AssetAI</div>
+          <div className="text-indigo-300 font-medium tracking-widest uppercase" style={{fontSize:9}}>Management Suite</div>
+        </div>
+      </div>
+      <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mb-2">Main</p>
+      <nav className="flex flex-col gap-1">{NAV_ITEMS.map(i=><NavBtn key={i.label} item={i}/>)}</nav>
+      {isAdmin&&(<>
+        <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mt-5 mb-2">Admin</p>
+        <nav className="flex flex-col gap-1">{ADMIN_NAV_ITEMS.map(i=><NavBtn key={i.label} item={i}/>)}</nav>
+      </>)}
+      <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
+        <p className="text-xs font-semibold tracking-wide uppercase" style={{color:isAdmin?"#34d399":"#a5b4fc"}}>{user.role??"Employee"}</p>
+        <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{getDisplayName(user)}</p>
+        <p className="text-xs text-indigo-600 mt-0.5">v6.0.0 — Pro Plan</p>
+      </div>
     </div>
-    <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mb-2">Main</p>
-    <nav className="flex flex-col gap-1">{NAV_ITEMS.map(i=><NavBtn key={i.label} item={i}/>)}</nav>
-    {isAdmin&&(<><p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mt-5 mb-2">Admin</p><nav className="flex flex-col gap-1">{ADMIN_NAV_ITEMS.map(i=><NavBtn key={i.label} item={i}/>)}</nav></>)}
-    <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
-      <p className="text-xs font-semibold tracking-wide uppercase" style={{color:isAdmin?"#34d399":"#a5b4fc"}}>{user.role??"Employee"}</p>
-      <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{getDisplayName(user)}</p>
-      <p className="text-xs text-indigo-600 mt-0.5">v5.0.0 — Pro Plan</p>
-    </div>
-  </div>);
+  );
 }
+
 function Sidebar({ mobileOpen, onClose }) {
   const bg = "linear-gradient(180deg,#1e1b4b 0%,#312e81 60%,#134e4a 100%)";
   return (<>
@@ -372,7 +426,7 @@ function Sidebar({ mobileOpen, onClose }) {
 }
 
 // ─── NAVBAR ───────────────────────────────────────────────────────────────────
-function Navbar({ onMenuToggle, notifications }) {
+function Navbar({ onMenuToggle, notifications, now }) {
   const navigate = useNavigate(), user = getStoredUser(), { toast } = useToast();
   const bellRef = useRef(null);
   const [notifOpen, setNotifOpen] = useState(false), [anchorRect, setAnchorRect] = useState(null);
@@ -380,38 +434,46 @@ function Navbar({ onMenuToggle, notifications }) {
   const urgent = notifications.filter(n=>n.type==="critical"||n.type==="warning").length;
   const handleBell = ()=>{ if(bellRef.current) setAnchorRect(bellRef.current.getBoundingClientRect()); setNotifOpen(o=>!o); };
   const logout = ()=>{ localStorage.removeItem("user"); toast.info("Signed Out","Logged out successfully."); setTimeout(()=>navigate("/"),600); };
-  return (<header className="h-14 flex items-center px-4 sm:px-6 gap-3 flex-shrink-0 border-b" style={{background:"rgba(255,255,255,.85)",backdropFilter:"blur(12px)",borderColor:"rgba(79,70,229,.08)"}}>
-    <button onClick={onMenuToggle} className="lg:hidden w-8 h-8 rounded-lg flex items-center justify-center border border-indigo-100 bg-indigo-50/60 text-indigo-600 hover:bg-indigo-100 transition-colors flex-shrink-0">
-      <span className="flex flex-col gap-1 w-4"><span className="block h-0.5 bg-current rounded-full"/><span className="block h-0.5 bg-current rounded-full"/><span className="block h-0.5 bg-current rounded-full"/></span>
-    </button>
-    <div className="flex-1 min-w-0">
-      <span className="text-sm font-bold text-indigo-950 hidden sm:inline">{getDashboardLabel(user)}</span>
-      <span className="text-xs text-indigo-300 font-normal hidden sm:inline"> / Audit Logs</span>
-      <span className="text-sm font-bold text-indigo-950 sm:hidden">Audit Logs</span>
-    </div>
-    <div className="hidden md:flex items-center gap-1.5 border border-indigo-100 rounded-full px-3 py-1 text-xs font-medium text-indigo-600 bg-indigo-50/80">
-      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"/> Admin Portal
-    </div>
-    <button ref={bellRef} onClick={handleBell} className={`relative w-8 h-8 rounded-lg flex items-center justify-center text-sm border transition-colors flex-shrink-0 ${notifOpen?"bg-indigo-100 border-indigo-200":"border-indigo-100 bg-indigo-50/60 hover:bg-indigo-100"}`}>
-      🔔
-      {notifications.length>0&&(<span className="absolute -top-1 -right-1 w-4 h-4 rounded-full text-white flex items-center justify-center font-bold" style={{background:urgent>0?"linear-gradient(135deg,#f43f5e,#ec4899)":"linear-gradient(135deg,#4f46e5,#9333ea)",fontSize:9}}>{notifications.length>9?"9+":notifications.length}</span>)}
-    </button>
-    {notifOpen&&<NotificationDropdown notifications={notifications} anchorRect={anchorRect} onClose={()=>setNotifOpen(false)}/>}
-    <div className="flex items-center gap-2 border border-indigo-100 rounded-full px-2 py-1 bg-white cursor-pointer flex-shrink-0">
-      <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold" style={{background:"linear-gradient(135deg,#4f46e5,#14b8a6)"}}>{ini}</div>
-      <span className="text-xs font-medium text-slate-700 hidden sm:block max-w-20 truncate">{dName.split(" ")[0]}</span>
-    </div>
-    <button onClick={logout} className="text-xs text-indigo-500 border border-indigo-200 bg-indigo-50 px-2 sm:px-3 py-1.5 rounded-lg hover:bg-indigo-100 font-medium transition-colors flex-shrink-0">
-      <span className="hidden sm:inline">→ Logout</span><span className="sm:hidden">→</span>
-    </button>
-  </header>);
+  return (
+    <header className="h-14 flex items-center px-4 sm:px-6 gap-3 flex-shrink-0 border-b" style={{background:"rgba(255,255,255,.85)",backdropFilter:"blur(12px)",borderColor:"rgba(79,70,229,.08)"}}>
+      <button onClick={onMenuToggle} className="lg:hidden w-8 h-8 rounded-lg flex items-center justify-center border border-indigo-100 bg-indigo-50/60 text-indigo-600 hover:bg-indigo-100 transition-colors flex-shrink-0">
+        <span className="flex flex-col gap-1 w-4"><span className="block h-0.5 bg-current rounded-full"/><span className="block h-0.5 bg-current rounded-full"/><span className="block h-0.5 bg-current rounded-full"/></span>
+      </button>
+      <div className="flex-1 min-w-0">
+        <span className="text-sm font-bold text-indigo-950 hidden sm:inline">{getDashboardLabel(user)}</span>
+        <span className="text-xs text-indigo-300 font-normal hidden sm:inline"> / Audit Logs</span>
+        <span className="text-sm font-bold text-indigo-950 sm:hidden">Audit Logs</span>
+      </div>
+      <div className="hidden md:flex items-center gap-1.5 border border-indigo-100 rounded-full px-3 py-1 text-xs font-medium text-indigo-600 bg-indigo-50/80">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"/> Admin Portal
+      </div>
+      <button ref={bellRef} onClick={handleBell}
+        className={`relative w-8 h-8 rounded-lg flex items-center justify-center text-sm border transition-colors flex-shrink-0 ${notifOpen?"bg-indigo-100 border-indigo-200":"border-indigo-100 bg-indigo-50/60 hover:bg-indigo-100"}`}>
+        🔔
+        {notifications.length>0&&(
+          <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full text-white flex items-center justify-center font-bold"
+            style={{background:urgent>0?"linear-gradient(135deg,#f43f5e,#ec4899)":"linear-gradient(135deg,#4f46e5,#9333ea)",fontSize:9}}>
+            {notifications.length>9?"9+":notifications.length}
+          </span>
+        )}
+      </button>
+      {notifOpen&&<NotificationDropdown notifications={notifications} anchorRect={anchorRect} onClose={()=>setNotifOpen(false)}/>}
+      <div className="flex items-center gap-2 border border-indigo-100 rounded-full px-2 py-1 bg-white cursor-pointer flex-shrink-0">
+        <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold" style={{background:"linear-gradient(135deg,#4f46e5,#14b8a6)"}}>{ini}</div>
+        <span className="text-xs font-medium text-slate-700 hidden sm:block max-w-20 truncate">{dName.split(" ")[0]}</span>
+      </div>
+      <button onClick={logout} className="text-xs text-indigo-500 border border-indigo-200 bg-indigo-50 px-2 sm:px-3 py-1.5 rounded-lg hover:bg-indigo-100 font-medium transition-colors flex-shrink-0">
+        <span className="hidden sm:inline">→ Logout</span><span className="sm:hidden">→</span>
+      </button>
+    </header>
+  );
 }
 
 // ─── STAT CARD ────────────────────────────────────────────────────────────────
-function StatCard({ icon, label, value, sub, gradient, glowColor, trend, trendColor }) {
+function StatCard({ icon, label, value, sub, gradient, glowColor, trend }) {
   return (
     <div className="relative overflow-hidden rounded-2xl p-5 cursor-default transition-all duration-300 hover:-translate-y-1 hover:scale-[1.02]"
-      style={{background:gradient, boxShadow:`0 4px 28px ${glowColor}`}}>
+      style={{background:gradient,boxShadow:`0 4px 28px ${glowColor}`}}>
       <div className="absolute inset-0 opacity-15" style={{background:"radial-gradient(circle at top right,white,transparent 65%)"}}/>
       <div className="absolute bottom-0 right-0 w-20 h-20 opacity-10" style={{background:"radial-gradient(circle,white,transparent 70%)"}}/>
       <div className="relative z-10">
@@ -433,7 +495,7 @@ function ActionBadge({ action, size = "sm" }) {
   const c = ACTION_CFG[cat] ?? ACTION_CFG.OTHER;
   return (
     <span className={`inline-flex items-center gap-1.5 ${size==="lg"?"px-4 py-1.5 text-sm":"px-2.5 py-1 text-xs"} rounded-full font-bold border`}
-      style={{background:c.bg, borderColor:c.border, color:c.color, boxShadow:c.glow}}>
+      style={{background:c.bg,borderColor:c.border,color:c.color,boxShadow:c.glow}}>
       <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{background:c.dot}}/>
       {action||"—"}
     </span>
@@ -511,12 +573,12 @@ function EmployeeMiniCard({ emp, deptMap, label, accentColor, accentBg, accentBo
           </span>
         </div>
         <div className="grid grid-cols-2 gap-2 p-3">
-          <DetailField label="Employee ID"   value={`#${norm.id}`}                          accent={accentColor}/>
+          <DetailField label="Employee ID"   value={`#${norm.id}`}                            accent={accentColor}/>
           <DetailField label="Department"    value={deptMap[norm.departmentId]||norm.departmentName||"—"} accent={accentColor}/>
-          <DetailField label="Joined Date"   value={fmtDate(norm.joinedDate)}                accent={accentColor}/>
-          <DetailField label="Account Since" value={fmtFull(norm.createdAt)}                 accent={accentColor}/>
-          <DetailField label="Status"        value={norm.status||"Active"}                   accent={accentColor}/>
-          <DetailField label="Role"          value={norm.role||"—"}                          accent={accentColor}/>
+          <DetailField label="Joined Date"   value={fmtDate(norm.joinedDate)}                  accent={accentColor}/>
+          <DetailField label="Account Since" value={fmtFull(norm.createdAt)}                   accent={accentColor}/>
+          <DetailField label="Status"        value={norm.status||"Active"}                     accent={accentColor}/>
+          <DetailField label="Role"          value={norm.role||"—"}                            accent={accentColor}/>
         </div>
       </div>
     </div>
@@ -524,21 +586,17 @@ function EmployeeMiniCard({ emp, deptMap, label, accentColor, accentBg, accentBo
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// [FIX-6] LOG DETAIL MODAL — white text fix + action highlight
+// LOG DETAIL MODAL
 // ═══════════════════════════════════════════════════════════════════════════
-function LogDetailModal({ log, employees, departments, onClose }) {
+function LogDetailModal({ log, employees, departments, onClose, now }) {
   const cat = actionCategory(log?.action);
-  const c = ACTION_CFG[cat] ?? ACTION_CFG.OTHER;
+  const c   = ACTION_CFG[cat] ?? ACTION_CFG.OTHER;
 
   const deptMap = useMemo(()=>{
     const m={};
     departments.forEach(d=>{ if(d.id!=null) m[d.id]=d.departmentName||d.department_name||`Dept #${d.id}`; });
     return m;
   },[departments]);
-
-  // [FIX-2] live relative time inside modal
-  const [, setTick] = useState(0);
-  useEffect(()=>{ const id=setInterval(()=>setTick(t=>t+1),60000); return ()=>clearInterval(id); },[]);
 
   const subjectEmp = useMemo(()=>{
     if(!log?.description) return null;
@@ -561,36 +619,11 @@ function LogDetailModal({ log, employees, departments, onClose }) {
     )??null;
   },[log,employees]);
 
-  // Action highlight config
   const actionHighlight = {
-    CREATE: {
-      emoji:"✨", title:"New Employee Created",
-      desc:"A new employee account was successfully created in the system.",
-      bg:"linear-gradient(135deg,rgba(16,185,129,.12),rgba(13,148,136,.08))",
-      border:"rgba(16,185,129,.3)", color:"#059669",
-      badge:"linear-gradient(135deg,#10b981,#059669)",
-    },
-    UPDATE: {
-      emoji:"✏️", title:"Employee Record Updated",
-      desc:"An existing employee's information was modified.",
-      bg:"linear-gradient(135deg,rgba(59,130,246,.12),rgba(8,145,178,.08))",
-      border:"rgba(59,130,246,.3)", color:"#2563eb",
-      badge:"linear-gradient(135deg,#3b82f6,#2563eb)",
-    },
-    DELETE: {
-      emoji:"🗑️", title:"Employee Deleted",
-      desc:"An employee record was permanently removed from the system.",
-      bg:"linear-gradient(135deg,rgba(239,68,68,.12),rgba(249,115,22,.08))",
-      border:"rgba(239,68,68,.3)", color:"#dc2626",
-      badge:"linear-gradient(135deg,#ef4444,#dc2626)",
-    },
-    OTHER: {
-      emoji:"📌", title:"System Action",
-      desc:"A system-level operation was performed.",
-      bg:"linear-gradient(135deg,rgba(107,114,128,.1),rgba(75,85,99,.08))",
-      border:"rgba(107,114,128,.2)", color:"#4b5563",
-      badge:"linear-gradient(135deg,#6b7280,#4b5563)",
-    },
+    CREATE: { emoji:"✨", title:"New Employee Created",    desc:"A new employee account was successfully created in the system.",    bg:"linear-gradient(135deg,rgba(16,185,129,.12),rgba(13,148,136,.08))",   border:"rgba(16,185,129,.3)", color:"#059669", badge:"linear-gradient(135deg,#10b981,#059669)" },
+    UPDATE: { emoji:"✏️", title:"Employee Record Updated", desc:"An existing employee's information was modified.",                  bg:"linear-gradient(135deg,rgba(59,130,246,.12),rgba(8,145,178,.08))",    border:"rgba(59,130,246,.3)", color:"#2563eb", badge:"linear-gradient(135deg,#3b82f6,#2563eb)" },
+    DELETE: { emoji:"🗑️", title:"Employee Deleted",        desc:"An employee record was permanently removed from the system.",       bg:"linear-gradient(135deg,rgba(239,68,68,.12),rgba(249,115,22,.08))",    border:"rgba(239,68,68,.3)", color:"#dc2626", badge:"linear-gradient(135deg,#ef4444,#dc2626)" },
+    OTHER:  { emoji:"📌", title:"System Action",           desc:"A system-level operation was performed.",                          bg:"linear-gradient(135deg,rgba(107,114,128,.1),rgba(75,85,99,.08))",     border:"rgba(107,114,128,.2)",color:"#4b5563", badge:"linear-gradient(135deg,#6b7280,#4b5563)" },
   };
   const hl = actionHighlight[cat] ?? actionHighlight.OTHER;
 
@@ -602,45 +635,40 @@ function LogDetailModal({ log, employees, departments, onClose }) {
         style={{boxShadow:"0 40px 80px rgba(79,70,229,.3),0 0 0 1px rgba(79,70,229,.1)"}}
         onClick={e=>e.stopPropagation()}>
 
-        {/* ── Header — gradient bg, ALL text forced white ── */}
+        {/* Header */}
         <div className="relative px-6 py-5 flex-shrink-0" style={{background:c.headerBg}}>
           <div className="absolute inset-0 opacity-15" style={{background:"radial-gradient(circle at top right,white,transparent 60%)"}}/>
           <button onClick={onClose}
             className="absolute top-4 right-4 w-8 h-8 rounded-xl flex items-center justify-center transition-colors z-10 text-sm font-bold"
             style={{background:"rgba(255,255,255,0.2)",color:"#ffffff"}}
             onMouseEnter={e=>e.currentTarget.style.background="rgba(255,255,255,0.35)"}
-            onMouseLeave={e=>e.currentTarget.style.background="rgba(255,255,255,0.2)"}>
-            ✕
-          </button>
+            onMouseLeave={e=>e.currentTarget.style.background="rgba(255,255,255,0.2)"}>✕</button>
           <div className="relative flex items-start gap-4">
-            {/* Large action icon */}
             <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-2xl flex-shrink-0 border-2"
               style={{background:"rgba(255,255,255,0.2)",borderColor:"rgba(255,255,255,0.35)"}}>
               {c.icon}
             </div>
             <div className="flex-1 min-w-0">
-              {/* [FIX-6] Action badge — white text always */}
               <div className="flex items-center gap-2 flex-wrap mb-1.5">
                 <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black border"
                   style={{background:"rgba(255,255,255,0.25)",borderColor:"rgba(255,255,255,0.4)",color:"#ffffff",letterSpacing:"0.05em"}}>
                   <span className="w-1.5 h-1.5 rounded-full bg-white flex-shrink-0"/>
                   {log?.action||"ACTION"}
                 </span>
-                {/* [FIX-6] Log # — always white */}
                 <span className="text-xs font-bold" style={{color:"rgba(255,255,255,0.7)"}}>Log #{log?.id}</span>
               </div>
-              {/* [FIX-6] Description — white */}
               <p className="text-sm font-bold leading-snug line-clamp-2" style={{color:"#ffffff"}}>
                 {log?.description||"Audit Entry"}
               </p>
-              {/* [FIX-1] Timestamps — both white */}
               <div className="flex items-center gap-2 mt-2 flex-wrap">
+                {/* [FIX-1] Exact IST time */}
                 <span className="text-xs font-semibold" style={{color:"rgba(255,255,255,0.85)"}}>
                   🕐 {fmtFull(log?.timestamp)}
                 </span>
+                {/* [FIX-2] Live relative time using passed `now` */}
                 <span className="text-xs font-bold px-2 py-0.5 rounded-full"
                   style={{background:"rgba(255,255,255,0.2)",color:"rgba(255,255,255,0.9)"}}>
-                  {timeAgo(log?.timestamp)}
+                  {timeAgo(log?.timestamp, now)}
                 </span>
               </div>
             </div>
@@ -649,35 +677,25 @@ function LogDetailModal({ log, employees, departments, onClose }) {
 
         <div className="overflow-y-auto flex-1">
           <div className="p-5 flex flex-col gap-4">
-
-            {/* ── [FIX-6] ACTION HIGHLIGHT CALLOUT ── */}
+            {/* Action highlight callout */}
             <div className="rounded-2xl border overflow-hidden" style={{background:hl.bg,borderColor:hl.border}}>
               <div className="flex items-center gap-3 px-4 py-3">
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl flex-shrink-0 text-white"
-                  style={{background:hl.badge}}>
-                  {hl.emoji}
-                </div>
+                  style={{background:hl.badge}}>{hl.emoji}</div>
                 <div className="flex-1">
                   <p className="text-sm font-black" style={{color:hl.color}}>{hl.title}</p>
                   <p className="text-xs mt-0.5" style={{color:hl.color,opacity:0.75}}>{hl.desc}</p>
                 </div>
                 <span className="text-xs font-black px-2.5 py-1 rounded-full text-white flex-shrink-0"
-                  style={{background:hl.badge}}>
-                  {cat}
-                </span>
+                  style={{background:hl.badge}}>{cat}</span>
               </div>
             </div>
 
-            {/* ── Who performed — white text fix ── */}
-            {/* [FIX-6] The "Performed By" header is now on a dark-tinted bg to ensure visibility */}
+            {/* Performed By */}
             <div className="rounded-2xl border border-indigo-100 overflow-hidden">
-              <div className="flex items-center gap-2 px-4 py-2.5"
-                style={{background:"linear-gradient(90deg,#312e81,#1e3a5f)"}}>
+              <div className="flex items-center gap-2 px-4 py-2.5" style={{background:"linear-gradient(90deg,#312e81,#1e3a5f)"}}>
                 <span className="text-base">👑</span>
-                {/* [FIX-6] FORCE WHITE — was green-on-green before */}
-                <p className="text-xs font-bold uppercase tracking-widest" style={{color:"#ffffff"}}>
-                  Performed By
-                </p>
+                <p className="text-xs font-bold uppercase tracking-widest" style={{color:"#ffffff"}}>Performed By</p>
               </div>
               <div className="px-4 py-3 flex items-center gap-3 bg-slate-50/50">
                 {performerEmp ? (
@@ -710,27 +728,26 @@ function LogDetailModal({ log, employees, departments, onClose }) {
               </div>
             </div>
 
-            {/* ── Full description ── */}
+            {/* Full description */}
             <div className="rounded-xl p-4 border" style={{background:c.bg,borderColor:c.border}}>
               <p className="text-xs font-bold uppercase tracking-widest mb-2" style={{color:c.color}}>📝 Full Action Description</p>
               <p className="text-sm font-medium text-slate-700 leading-relaxed">{log?.description||"No description available."}</p>
             </div>
 
-            {/* ── Timestamps ── */}
+            {/* Timestamps */}
             <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-xl p-3.5 border border-indigo-100"
-                style={{background:"linear-gradient(135deg,rgba(79,70,229,.06),rgba(99,102,241,.04))"}}>
+              <div className="rounded-xl p-3.5 border border-indigo-100" style={{background:"linear-gradient(135deg,rgba(79,70,229,.06),rgba(99,102,241,.04))"}}>
                 <p className="text-xs font-bold text-indigo-400 uppercase tracking-widest mb-1">📅 Performed On (IST)</p>
                 <p className="text-xs font-black text-indigo-700">{fmtFull(log?.timestamp)}</p>
               </div>
-              <div className="rounded-xl p-3.5 border border-violet-100"
-                style={{background:"linear-gradient(135deg,rgba(124,58,237,.06),rgba(139,92,246,.04))"}}>
+              <div className="rounded-xl p-3.5 border border-violet-100" style={{background:"linear-gradient(135deg,rgba(124,58,237,.06),rgba(139,92,246,.04))"}}>
                 <p className="text-xs font-bold text-violet-400 uppercase tracking-widest mb-1">⏱ Time Elapsed</p>
-                <p className="text-xs font-black text-violet-700">{timeAgo(log?.timestamp)}</p>
+                {/* [FIX-2] use passed now */}
+                <p className="text-xs font-black text-violet-700">{timeAgo(log?.timestamp, now)}</p>
               </div>
             </div>
 
-            {/* ── Subject employee card ── */}
+            {/* Subject employee */}
             {subjectEmp && Number(subjectEmp.id) !== Number(performerEmp?.id) && (
               <EmployeeMiniCard
                 emp={subjectEmp}
@@ -741,21 +758,13 @@ function LogDetailModal({ log, employees, departments, onClose }) {
                 accentBorder={c.border}
               />
             )}
-            {subjectEmp && Number(subjectEmp.id) === Number(performerEmp?.id) && cat==="CREATE" && (
-              <div className="rounded-xl p-3 border border-indigo-100 text-xs text-indigo-600"
-                style={{background:"rgba(79,70,229,.05)"}}>
-                ℹ️ The admin created their own account in this action.
-              </div>
-            )}
             {!subjectEmp && cat==="CREATE" && (
-              <div className="rounded-xl p-3 border border-amber-100 text-xs text-amber-700"
-                style={{background:"rgba(245,158,11,.05)"}}>
+              <div className="rounded-xl p-3 border border-amber-100 text-xs text-amber-700" style={{background:"rgba(245,158,11,.05)"}}>
                 ℹ️ Created employee record not found — may have been deleted since. See description above.
               </div>
             )}
             {!subjectEmp && cat==="DELETE" && (
-              <div className="rounded-xl p-3 border border-red-100 text-xs text-red-600"
-                style={{background:"rgba(239,68,68,.05)"}}>
+              <div className="rounded-xl p-3 border border-red-100 text-xs text-red-600" style={{background:"rgba(239,68,68,.05)"}}>
                 🗑️ This employee's record has been permanently deleted. See description above for details.
               </div>
             )}
@@ -783,34 +792,40 @@ function SkeletonRow() {
 // ─── ACCESS DENIED ────────────────────────────────────────────────────────────
 function AccessDenied() {
   const navigate = useNavigate();
-  return (<div className="flex flex-col items-center justify-center min-h-screen gap-6 p-8" style={{background:"linear-gradient(135deg,#f0f0ff,#f5f9ff,#f0fff8)"}}>
-    <div className="w-24 h-24 rounded-3xl flex items-center justify-center text-5xl" style={{background:"linear-gradient(135deg,#fee2e2,#fecaca)"}}>🔒</div>
-    <div className="text-center"><h2 className="text-2xl font-black text-slate-900 mb-2">Access Denied</h2><p className="text-slate-500 text-sm max-w-xs">Admin access is required to view audit logs.</p></div>
-    <button onClick={()=>navigate("/dashboard")} className="px-6 py-3 rounded-xl text-sm font-bold text-white" style={{background:"linear-gradient(90deg,#4f46e5,#7c3aed)",boxShadow:"0 4px 14px rgba(79,70,229,.4)"}}>← Return to Dashboard</button>
-  </div>);
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen gap-6 p-8" style={{background:"linear-gradient(135deg,#f0f0ff,#f5f9ff,#f0fff8)"}}>
+      <div className="w-24 h-24 rounded-3xl flex items-center justify-center text-5xl" style={{background:"linear-gradient(135deg,#fee2e2,#fecaca)"}}>🔒</div>
+      <div className="text-center"><h2 className="text-2xl font-black text-slate-900 mb-2">Access Denied</h2><p className="text-slate-500 text-sm max-w-xs">Admin access is required to view audit logs.</p></div>
+      <button onClick={()=>navigate("/dashboard")} className="px-6 py-3 rounded-xl text-sm font-bold text-white" style={{background:"linear-gradient(90deg,#4f46e5,#7c3aed)",boxShadow:"0 4px 14px rgba(79,70,229,.4)"}}>← Return to Dashboard</button>
+    </div>
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// [FIX-5] COLORFUL ANALYTICS PANEL — vibrant, eye-catching
+// [FIX-7] ANALYTICS PANEL — "All" period Recent Actions fixed
 // ═══════════════════════════════════════════════════════════════════════════
-function AnalyticsPanel({ logs, localDeleteCount }) {
+function AnalyticsPanel({ logs, localDeleteCount, now }) {
   const [period, setPeriod] = useState("week");
-  // [FIX-2] tick for relative time updates inside analytics
-  const [, setTick] = useState(0);
-  useEffect(()=>{ const id=setInterval(()=>setTick(t=>t+1),60000); return ()=>clearInterval(id); },[]);
 
   const periodStart = useMemo(()=>{
     if(period==="week")  return startOfWeek();
     if(period==="month") return startOfMonth();
     if(period==="year")  return startOfYear();
-    return new Date(0);
+    return new Date(0); // "all" — epoch start, includes everything
   },[period]);
 
-  const periodLogs = useMemo(()=>logs.filter(l=>l.timestamp&&new Date(l.timestamp)>=periodStart),[logs,periodStart]);
+  // [FIX-7] For "all", periodStart = epoch so every log passes the filter
+  const periodLogs = useMemo(()=>
+    logs.filter(l => {
+      if (!l.timestamp) return period === "all";
+      return new Date(l.timestamp) >= periodStart;
+    }),
+  [logs, periodStart, period]);
+
   const creates = periodLogs.filter(l=>actionCategory(l.action)==="CREATE");
   const updates = periodLogs.filter(l=>actionCategory(l.action)==="UPDATE");
   const deletes = periodLogs.filter(l=>actionCategory(l.action)==="DELETE");
-  const total   = periodLogs.length || 1; // avoid /0
+  const total   = periodLogs.length || 1;
 
   const byPerformer = useMemo(()=>{
     const m={};
@@ -828,9 +843,16 @@ function AnalyticsPanel({ logs, localDeleteCount }) {
   },[periodLogs]);
 
   const maxActivity = Math.max(...byPerformer.map(p=>p.total),1);
-  const LABELS={week:"This Week",month:"This Month",year:"This Year",all:"All Time"};
+  const LABELS = {week:"This Week",month:"This Month",year:"This Year",all:"All Time"};
 
-  // Metric cards config
+  // [FIX-7] Sorted recent actions for the feed — works for all periods including "all"
+  const recentActions = useMemo(()=>
+    [...periodLogs]
+      .filter(l => l.timestamp) // guard against missing timestamps
+      .sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp))
+      .slice(0,10),
+  [periodLogs]);
+
   const metrics = [
     { label:"Total Actions",    value:periodLogs.length, icon:"📋", gradient:"linear-gradient(135deg,#4f46e5,#7c3aed)", glow:"rgba(79,70,229,.35)",  pct:100 },
     { label:"Created",          value:creates.length,    icon:"✨", gradient:"linear-gradient(135deg,#059669,#10b981)", glow:"rgba(16,185,129,.35)", pct:Math.round((creates.length/total)*100) },
@@ -854,7 +876,6 @@ function AnalyticsPanel({ logs, localDeleteCount }) {
             </p>
           </div>
         </div>
-        {/* Period selector */}
         <div className="flex items-center gap-1 rounded-xl p-1" style={{background:"rgba(255,255,255,.1)"}}>
           {["week","month","year","all"].map(p=>(
             <button key={p} onClick={()=>setPeriod(p)}
@@ -869,7 +890,7 @@ function AnalyticsPanel({ logs, localDeleteCount }) {
       </div>
 
       <div className="p-5" style={{background:"linear-gradient(135deg,#fafbff,#f0fdf4)"}}>
-        {/* [FIX-5] Colorful metric ring cards */}
+        {/* Colorful metric cards */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
           {metrics.map(m=>(
             <div key={m.label} className="relative overflow-hidden rounded-2xl p-4 text-center"
@@ -891,26 +912,24 @@ function AnalyticsPanel({ logs, localDeleteCount }) {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          {/* [FIX-5] Admin activity — segmented coloured bars */}
+          {/* Admin activity segmented bars */}
           <div className="bg-white rounded-2xl p-4 border border-indigo-50" style={{boxShadow:"0 2px 12px rgba(79,70,229,.06)"}}>
             <div className="flex items-center gap-2 mb-4">
               <span className="text-base">👑</span>
               <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Admin Activity</p>
+              <span className="ml-auto text-xs text-slate-400">{LABELS[period]}</span>
             </div>
             {byPerformer.length===0
-              ? <p className="text-xs text-slate-300 italic text-center py-8">No activity in this period</p>
+              ? (
+                <div className="flex flex-col items-center justify-center py-8 gap-2">
+                  <span className="text-3xl opacity-30">👤</span>
+                  <p className="text-xs text-slate-300 italic">No admin activity in {LABELS[period].toLowerCase()}</p>
+                </div>
+              )
               : <div className="flex flex-col gap-3">
                   {byPerformer.map((a,i)=>{
-                    const grad = [
-                      "linear-gradient(90deg,#4f46e5,#7c3aed)",
-                      "linear-gradient(90deg,#059669,#10b981)",
-                      "linear-gradient(90deg,#ef4444,#f97316)",
-                      "linear-gradient(90deg,#0891b2,#3b82f6)",
-                      "linear-gradient(90deg,#7c3aed,#ec4899)",
-                    ][i%5];
                     const cPct = Math.round((a.creates/a.total)*100)||0;
                     const uPct = Math.round((a.updates/a.total)*100)||0;
-                    const dPct = 100-cPct-uPct;
                     return (
                       <div key={a.name}>
                         <div className="flex items-center justify-between mb-1.5">
@@ -919,7 +938,7 @@ function AnalyticsPanel({ logs, localDeleteCount }) {
                               style={{background:avatarColor(a.name)}}>
                               {empInitials(a.name)}
                             </div>
-                            <span className="text-xs font-bold text-slate-700 truncate max-w-24">{a.name}</span>
+                            <span className="text-xs font-bold text-slate-700 truncate max-w-28">{a.name}</span>
                           </div>
                           <div className="flex items-center gap-1">
                             <span className="text-xs font-black text-white px-1.5 py-0.5 rounded-md" style={{background:"linear-gradient(90deg,#4f46e5,#7c3aed)"}}>{a.total}</span>
@@ -928,16 +947,14 @@ function AnalyticsPanel({ logs, localDeleteCount }) {
                             {a.deletes>0&&<span className="text-xs font-bold px-1.5 py-0.5 rounded-md bg-red-100 text-red-700">🗑{a.deletes}</span>}
                           </div>
                         </div>
-                        {/* Segmented bar */}
                         <div className="h-3 rounded-full overflow-hidden flex" style={{background:"rgba(0,0,0,.06)"}}>
-                          {cPct>0&&<div className="h-full transition-all duration-700" style={{width:`${(a.creates/maxActivity)*100}%`,background:"linear-gradient(90deg,#10b981,#059669)"}}/>}
-                          {uPct>0&&<div className="h-full transition-all duration-700" style={{width:`${(a.updates/maxActivity)*100}%`,background:"linear-gradient(90deg,#3b82f6,#2563eb)"}}/>}
+                          {a.creates>0&&<div className="h-full transition-all duration-700" style={{width:`${(a.creates/maxActivity)*100}%`,background:"linear-gradient(90deg,#10b981,#059669)"}}/>}
+                          {a.updates>0&&<div className="h-full transition-all duration-700" style={{width:`${(a.updates/maxActivity)*100}%`,background:"linear-gradient(90deg,#3b82f6,#2563eb)"}}/>}
                           {a.deletes>0&&<div className="h-full transition-all duration-700" style={{width:`${(a.deletes/maxActivity)*100}%`,background:"linear-gradient(90deg,#ef4444,#f97316)"}}/>}
                         </div>
                       </div>
                     );
                   })}
-                  {/* Legend */}
                   <div className="flex items-center gap-3 pt-1">
                     {[{c:"#10b981",l:"Create"},{c:"#3b82f6",l:"Update"},{c:"#ef4444",l:"Delete"}].map(({c:col,l})=>(
                       <div key={l} className="flex items-center gap-1">
@@ -950,41 +967,68 @@ function AnalyticsPanel({ logs, localDeleteCount }) {
             }
           </div>
 
-          {/* [FIX-5] Recent actions feed — coloured left-border cards */}
+          {/* [FIX-7] Recent Actions — properly handles all periods */}
           <div className="bg-white rounded-2xl p-4 border border-indigo-50" style={{boxShadow:"0 2px 12px rgba(79,70,229,.06)"}}>
             <div className="flex items-center gap-2 mb-4">
               <span className="text-base">⚡</span>
               <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Recent Actions</p>
+              <span className="ml-auto text-xs font-semibold px-2 py-0.5 rounded-full"
+                style={{background:"linear-gradient(90deg,#4f46e5,#7c3aed)",color:"white"}}>
+                {recentActions.length} of {periodLogs.length}
+              </span>
             </div>
-            {periodLogs.length===0
-              ? <p className="text-xs text-slate-300 italic text-center py-8">No actions in this period</p>
-              : <div className="flex flex-col gap-2 max-h-56 overflow-y-auto pr-1">
-                  {[...periodLogs]
-                    .sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp))
-                    .slice(0,10)
-                    .map(l=>{
-                      const cat2=actionCategory(l.action);
-                      const cfg=ACTION_CFG[cat2]??ACTION_CFG.OTHER;
-                      return (
-                        <div key={l.id}
-                          className="flex items-start gap-3 rounded-xl px-3 py-2.5 border-l-4"
-                          style={{borderLeftColor:cfg.dot,background:cfg.cardBg,border:`1px solid ${cfg.border}`,borderLeftWidth:4}}>
-                          <span className="text-lg flex-shrink-0 mt-0.5">{cfg.icon}</span>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5 mb-0.5">
-                              <span className="text-xs font-black px-1.5 py-0.5 rounded-md text-white"
-                                style={{background:cfg.badgeBg,fontSize:9}}>
-                                {cat2}
-                              </span>
-                              <span className="text-xs text-slate-400">{timeAgo(l.timestamp)}</span>
-                            </div>
-                            <p className="text-xs font-semibold text-slate-700 line-clamp-1">{l.description||"—"}</p>
-                            <p className="text-xs font-bold mt-0.5" style={{color:cfg.color}}>{l.performedBy||"Admin"}</p>
-                          </div>
-                        </div>
-                      );
-                    })}
+            {recentActions.length === 0
+              ? (
+                <div className="flex flex-col items-center justify-center py-8 gap-2">
+                  <span className="text-3xl opacity-30">⚡</span>
+                  <p className="text-xs text-slate-300 italic">No actions recorded for {LABELS[period].toLowerCase()}</p>
+                  {period !== "all" && (
+                    <button
+                      className="text-xs text-indigo-500 underline mt-1"
+                      onClick={()=>setPeriod("all")}>
+                      View all time →
+                    </button>
+                  )}
                 </div>
+              )
+              : (
+                <div className="flex flex-col gap-2 max-h-64 overflow-y-auto pr-1" style={{scrollbarWidth:"thin"}}>
+                  {recentActions.map(l=>{
+                    const cat2=actionCategory(l.action);
+                    const cfg=ACTION_CFG[cat2]??ACTION_CFG.OTHER;
+                    return (
+                      <div key={l.id}
+                        className="flex items-start gap-3 rounded-xl px-3 py-2.5"
+                        style={{
+                          borderLeft:`4px solid ${cfg.dot}`,
+                          background:cfg.cardBg,
+                          border:`1px solid ${cfg.border}`,
+                          borderLeftWidth:4,
+                          borderLeftColor:cfg.dot,
+                        }}>
+                        <span className="text-lg flex-shrink-0 mt-0.5">{cfg.icon}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                            <span className="inline-block text-xs font-black px-1.5 py-0.5 rounded-md text-white"
+                              style={{background:cfg.badgeBg,fontSize:9}}>
+                              {cat2}
+                            </span>
+                            {/* [FIX-2] live relative time */}
+                            <span className="text-xs text-slate-400">{timeAgo(l.timestamp, now)}</span>
+                          </div>
+                          <p className="text-xs font-semibold text-slate-700 truncate"
+                            title={l.description||"—"}>
+                            {l.description||"—"}
+                          </p>
+                          <p className="text-xs font-bold mt-0.5" style={{color:cfg.color}}>
+                            {l.performedBy||"Admin"}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
             }
           </div>
         </div>
@@ -998,37 +1042,30 @@ function AnalyticsPanel({ logs, localDeleteCount }) {
 // ═══════════════════════════════════════════════════════════════════════════
 const PAGE_SIZE = 10;
 
-function AuditLogsContent() {
+function AuditLogsContent({ now }) {
   const { toast } = useToast();
-  const [logs,        setLogs]        = useState([]);
-  const [employees,   setEmployees]   = useState([]);
-  const [departments, setDepartments] = useState([]);
-  const [loading,     setLoading]     = useState(true);
-  const [search,      setSearch]      = useState("");
-  const [filter,      setFilter]      = useState("All");
-  const [page,        setPage]        = useState(1);
-  const [viewLog,     setViewLog]     = useState(null);
-  const [lastRefresh, setLastRefresh] = useState(null);
+  const [logs,         setLogs]         = useState([]);
+  const [employees,    setEmployees]     = useState([]);
+  const [departments,  setDepartments]  = useState([]);
+  const [loading,      setLoading]      = useState(true);
+  const [search,       setSearch]       = useState("");
+  const [filter,       setFilter]       = useState("All");
+  const [page,         setPage]         = useState(1);
+  // [FIX-6] viewLog only set by explicit "View →" button click
+  const [viewLog,      setViewLog]      = useState(null);
+  const [lastRefresh,  setLastRefresh]  = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteLogLoading, setDeleteLogLoading] = useState(false);
 
-  // [FIX-3] Audit log delete state
-  const [deleteTarget,    setDeleteTarget]    = useState(null);
-  const [deleteLogLoading,setDeleteLogLoading]= useState(false);
+  // [FIX-4] Local soft-delete count
+  const [localDeleteCount, setLocalDeleteCount] = useState(()=>loadDeletedHistory().length);
 
-  // [FIX-4] Local soft-delete count from AdminEmployeeManagement localStorage
-  const [localDeleteCount, setLocalDeleteCount] = useState(() => loadDeletedHistory().length);
-
-  // Sync localDeleteCount whenever localStorage changes (cross-tab or same tab via storage event)
-  useEffect(() => {
-    const sync = () => setLocalDeleteCount(loadDeletedHistory().length);
+  useEffect(()=>{
+    const sync = ()=>setLocalDeleteCount(loadDeletedHistory().length);
     window.addEventListener("storage", sync);
-    // Also poll every 5s for same-tab changes (localStorage doesn't fire storage event in same tab)
     const id = setInterval(sync, 5000);
-    return () => { window.removeEventListener("storage", sync); clearInterval(id); };
-  }, []);
-
-  // [FIX-2] Auto-update relative time every 60s
-  const [, setTick] = useState(0);
-  useEffect(()=>{ const id=setInterval(()=>setTick(t=>t+1),60000); return ()=>clearInterval(id); },[]);
+    return ()=>{ window.removeEventListener("storage", sync); clearInterval(id); };
+  },[]);
 
   const fetchAll = useCallback(async (silent=false) => {
     if(!silent) setLoading(true);
@@ -1038,14 +1075,14 @@ function AuditLogsContent() {
         api.get("/api/employees"),
         api.get("/api/departments"),
       ]);
-      const logsData = Array.isArray(logsRes.data)?logsRes.data:[];
+      const logsData = Array.isArray(logsRes.data) ? logsRes.data : [];
       // Sort newest first
       logsData.sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp));
       setLogs(logsData);
       setEmployees(Array.isArray(empsRes.data)?empsRes.data:[]);
       setDepartments(Array.isArray(deptsRes.data)?deptsRes.data:[]);
-      // [FIX-1] Record exact time of fetch using IST
-      setLastRefresh(new Date().toISOString());
+      // [FIX-8] Record exact refresh time
+      setLastRefresh(nowISO());
       if(!silent) toast.success("Logs Loaded",`${logsData.length} audit record${logsData.length!==1?"s":""} fetched.`);
     } catch(err) {
       toast.error("Load Failed", err.response?.data?.message||err.message||"Could not fetch audit logs.");
@@ -1063,30 +1100,26 @@ function AuditLogsContent() {
         headers: { "X-Performed-By": getStoredUser().employeeName || getStoredUser().email || "Admin" },
       });
     } catch(err) {
-      const status = err.response?.status;
-      if (status !== 404) {
-        toast.warning("Note", `Backend: ${err.response?.data?.message||err.message}. Removing locally anyway.`);
+      if (err.response?.status !== 404) {
+        toast.warning("Note", `Backend: ${err.response?.data?.message||err.message}. Removing locally.`);
       }
     } finally {
-      // Always remove from local list
-      setLogs(prev => prev.filter(l => l.id !== deleteTarget.id));
-      toast.success("Log Deleted", `Audit log #${deleteTarget.id} permanently removed.`);
+      setLogs(prev=>prev.filter(l=>l.id!==deleteTarget.id));
+      toast.success("Log Deleted",`Audit log #${deleteTarget.id} permanently removed.`);
       setDeleteTarget(null);
       setDeleteLogLoading(false);
     }
   };
 
-  // [FIX-4] Stats from server logs + local deletes
   const stats = useMemo(()=>{
-    const today = startOfToday();
-    const week  = startOfWeek();
+    const today=startOfToday(), week=startOfWeek();
     return {
-      total:       logs.length,
-      today:       logs.filter(l=>l.timestamp&&new Date(l.timestamp)>=today).length,
-      deletes:     logs.filter(l=>actionCategory(l.action)==="DELETE").length,
-      creates:     logs.filter(l=>actionCategory(l.action)==="CREATE").length,
-      thisWeek:    logs.filter(l=>l.timestamp&&new Date(l.timestamp)>=week).length,
-      localDeletes:localDeleteCount,
+      total:        logs.length,
+      today:        logs.filter(l=>l.timestamp&&new Date(l.timestamp)>=today).length,
+      deletes:      logs.filter(l=>actionCategory(l.action)==="DELETE").length,
+      creates:      logs.filter(l=>actionCategory(l.action)==="CREATE").length,
+      thisWeek:     logs.filter(l=>l.timestamp&&new Date(l.timestamp)>=week).length,
+      localDeletes: localDeleteCount,
     };
   },[logs,localDeleteCount]);
 
@@ -1114,7 +1147,7 @@ function AuditLogsContent() {
   return (
     <div className="flex flex-col gap-5 pb-6">
 
-      {/* ── Page Header ── */}
+      {/* Page Header */}
       <div className="relative overflow-hidden rounded-3xl p-6 sm:p-8"
         style={{background:"linear-gradient(135deg,#1e1b4b 0%,#312e81 55%,#134e4a 100%)",boxShadow:"0 8px 40px rgba(79,70,229,.3)"}}>
         <div className="absolute inset-0 opacity-10" style={{background:"radial-gradient(ellipse at top right,white,transparent 60%)"}}/>
@@ -1142,21 +1175,20 @@ function AuditLogsContent() {
         </div>
       </div>
 
-      {/* ── Stats Cards ── */}
+      {/* Stats Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-        <StatCard icon="📋" label="Total Logs"       value={stats.total}        sub="All recorded events"      gradient="linear-gradient(135deg,#4f46e5,#7c3aed)" glowColor="rgba(79,70,229,.3)"   trend="All"/>
-        <StatCard icon="⚡" label="Today"            value={stats.today}        sub="Since midnight IST"       gradient="linear-gradient(135deg,#0369a1,#0891b2)" glowColor="rgba(3,105,161,.3)"   trend="Today"/>
-        <StatCard icon="📅" label="This Week"        value={stats.thisWeek}     sub="Current week"             gradient="linear-gradient(135deg,#7c3aed,#ec4899)" glowColor="rgba(124,58,237,.3)"  trend="Week"/>
-        <StatCard icon="✨" label="Creates"          value={stats.creates}      sub="New records"              gradient="linear-gradient(135deg,#059669,#10b981)" glowColor="rgba(5,150,105,.3)"   trend="Growth"/>
-        <StatCard icon="🗑️" label="Deletes (Server)" value={stats.deletes}      sub="Server-logged deletes"    gradient="linear-gradient(135deg,#ef4444,#f97316)" glowColor="rgba(220,38,38,.3)"   trend={stats.deletes>0?"⚠ Alert":"✓"}/>
-        {/* [FIX-4] Session deletes from AdminEmployeeManagement localStorage */}
-        <StatCard icon="🗂️" label="Deletes (Session)"value={stats.localDeletes} sub="From Employee Mgmt"       gradient="linear-gradient(135deg,#7c3aed,#c026d3)" glowColor="rgba(124,58,237,.3)"  trend={stats.localDeletes>0?"Active":"None"}/>
+        <StatCard icon="📋" label="Total Logs"        value={stats.total}        sub="All recorded events"    gradient="linear-gradient(135deg,#4f46e5,#7c3aed)" glowColor="rgba(79,70,229,.3)"   trend="All"/>
+        <StatCard icon="⚡" label="Today"             value={stats.today}        sub="Since midnight IST"     gradient="linear-gradient(135deg,#0369a1,#0891b2)" glowColor="rgba(3,105,161,.3)"   trend="Today"/>
+        <StatCard icon="📅" label="This Week"         value={stats.thisWeek}     sub="Current week"           gradient="linear-gradient(135deg,#7c3aed,#ec4899)" glowColor="rgba(124,58,237,.3)"  trend="Week"/>
+        <StatCard icon="✨" label="Creates"           value={stats.creates}      sub="New records"            gradient="linear-gradient(135deg,#059669,#10b981)" glowColor="rgba(5,150,105,.3)"   trend="Growth"/>
+        <StatCard icon="🗑️" label="Deletes (Server)"  value={stats.deletes}      sub="Server-logged deletes"  gradient="linear-gradient(135deg,#ef4444,#f97316)" glowColor="rgba(220,38,38,.3)"   trend={stats.deletes>0?"⚠ Alert":"✓"}/>
+        <StatCard icon="🗂️" label="Deletes (Session)" value={stats.localDeletes} sub="From Employee Mgmt"     gradient="linear-gradient(135deg,#7c3aed,#c026d3)" glowColor="rgba(124,58,237,.3)"  trend={stats.localDeletes>0?"Active":"None"}/>
       </div>
 
-      {/* ── Analytics Panel ── */}
-      <AnalyticsPanel logs={logs} localDeleteCount={localDeleteCount}/>
+      {/* Analytics Panel */}
+      <AnalyticsPanel logs={logs} localDeleteCount={localDeleteCount} now={now}/>
 
-      {/* ── Filters ── */}
+      {/* Filters */}
       <div className="bg-white rounded-2xl border border-indigo-50 p-4" style={{boxShadow:"0 2px 12px rgba(79,70,229,.06)"}}>
         <div className="flex flex-col sm:flex-row gap-3 flex-wrap">
           <div className="relative flex-1 min-w-52">
@@ -1168,7 +1200,7 @@ function AuditLogsContent() {
           <div className="flex items-center gap-1 bg-slate-50 rounded-xl p-1 border border-slate-200">
             {["All","CREATE","UPDATE","DELETE"].map(f=>{
               const active=filter===f;
-              const cfg=ACTION_CFG[f]??{dot:"#6b7280",badgeBg:"linear-gradient(90deg,#4f46e5,#7c3aed)"};
+              const cfg=ACTION_CFG[f]??{badgeBg:"linear-gradient(90deg,#4f46e5,#7c3aed)"};
               return (
                 <button key={f} onClick={()=>setFilter(f)}
                   className="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
@@ -1190,7 +1222,7 @@ function AuditLogsContent() {
         </p>
       </div>
 
-      {/* ── Table ── */}
+      {/* Table */}
       <div className="bg-white rounded-2xl border border-indigo-50 overflow-hidden" style={{boxShadow:"0 2px 12px rgba(79,70,229,.06)"}}>
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-indigo-50/80"
           style={{background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)"}}>
@@ -1214,31 +1246,38 @@ function AuditLogsContent() {
               {loading
                 ? Array.from({length:6}).map((_,i)=><SkeletonRow key={i}/>)
                 : paged.length===0
-                  ? (<tr><td colSpan={6} className="px-5 py-20 text-center">
+                  ? (
+                    <tr><td colSpan={6} className="px-5 py-20 text-center">
                       <div className="flex flex-col items-center gap-3">
                         <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl"
                           style={{background:"linear-gradient(135deg,#f0f0ff,#e0e7ff)"}}>📜</div>
                         <p className="text-sm font-semibold text-slate-400">No logs found</p>
                         <p className="text-xs text-slate-300">Try adjusting your search or filter</p>
                       </div>
-                    </td></tr>)
+                    </td></tr>
+                  )
                   : paged.map((log,idx)=>{
                       const cat=actionCategory(log.action);
                       const cfg=ACTION_CFG[cat]??ACTION_CFG.OTHER;
                       return (
+                        // [FIX-6] NO onClick on <tr> — row click does NOT open modal
                         <tr key={log.id}
-                          className="hover:bg-indigo-50/40 transition-colors border-b border-slate-50 group"
-                          style={idx%2===1?{background:"rgba(248,250,252,0.6)"}:{}}
-                          onClick={()=>setViewLog(log)}>
-                          <td className="px-4 py-3.5 whitespace-nowrap" onClick={e=>e.stopPropagation()}>
+                          className="transition-colors border-b border-slate-50"
+                          style={idx%2===1?{background:"rgba(248,250,252,0.6)"}:{}}>
+
+                          <td className="px-4 py-3.5 whitespace-nowrap">
                             <ActionBadge action={log.action}/>
                           </td>
+
+                          {/* [FIX-6] Description — plain text, no click handler */}
                           <td className="px-4 py-3.5">
                             <div className="flex items-center gap-2">
                               <span className="text-base flex-shrink-0">{cfg.icon}</span>
-                              <span className="text-xs text-slate-700 font-medium line-clamp-2 leading-relaxed">{log.description||"—"}</span>
+                              <span className="text-xs text-slate-700 font-medium leading-relaxed line-clamp-2">{log.description||"—"}</span>
                             </div>
                           </td>
+
+                          {/* [FIX-6] Performed By — plain, no click */}
                           <td className="px-4 py-3.5 whitespace-nowrap">
                             <div className="flex items-center gap-2">
                               <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-black flex-shrink-0"
@@ -1248,20 +1287,26 @@ function AuditLogsContent() {
                               <span className="text-xs font-semibold text-slate-700">{log.performedBy||"—"}</span>
                             </div>
                           </td>
-                          {/* [FIX-1] Exact IST time + relative */}
+
+                          {/* [FIX-1][FIX-2] Exact IST + live relative time */}
                           <td className="px-4 py-3.5 whitespace-nowrap">
                             <p className="text-xs font-bold text-slate-700">{fmtFull(log.timestamp)}</p>
-                            {/* [FIX-2] Auto-updating relative time */}
-                            <p className="text-xs font-semibold mt-0.5" style={{color:cfg.color}}>{timeAgo(log.timestamp)}</p>
+                            <p className="text-xs font-semibold mt-0.5" style={{color:cfg.color}}>
+                              {timeAgo(log.timestamp, now)}
+                            </p>
                           </td>
-                          <td className="px-4 py-3.5" onClick={e=>e.stopPropagation()}>
-                            <button onClick={()=>setViewLog(log)}
+
+                          {/* [FIX-6] Only "View →" button opens the modal */}
+                          <td className="px-4 py-3.5">
+                            <button
+                              onClick={()=>setViewLog(log)}
                               className="px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-indigo-100 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">
                               View →
                             </button>
                           </td>
-                          {/* [FIX-3] Delete audit log button */}
-                          <td className="px-4 py-3.5" onClick={e=>e.stopPropagation()}>
+
+                          {/* [FIX-3] Delete button */}
+                          <td className="px-4 py-3.5">
                             <button
                               onClick={()=>setDeleteTarget(log)}
                               className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white border border-red-200 hover:shadow-md transition-all"
@@ -1277,7 +1322,8 @@ function AuditLogsContent() {
           </table>
         </div>
 
-        {!loading&&filtered.length>PAGE_SIZE&&(
+        {/* Pagination */}
+        {!loading && filtered.length > PAGE_SIZE && (
           <div className="flex items-center justify-between px-5 py-3 border-t border-indigo-50">
             <span className="text-xs text-slate-400">Page {page} of {totalPages} · {filtered.length} records</span>
             <div className="flex items-center gap-1">
@@ -1304,6 +1350,7 @@ function AuditLogsContent() {
           employees={employees}
           departments={departments}
           onClose={()=>setViewLog(null)}
+          now={now}
         />
       )}
       {deleteTarget && (
@@ -1323,12 +1370,22 @@ function AuditLogsContent() {
 // ═══════════════════════════════════════════════════════════════════════════
 function AdminAuditLogsInner() {
   const user = getStoredUser();
-  const [open, setOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [notifAssets, setNotifAssets] = useState([]);
   const [notifMaint,  setNotifMaint]  = useState([]);
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // [FIX-2] Single shared "now" — updated every 60s → propagated as prop
+  //         so ALL timeAgo() calls across the page re-render simultaneously
+  // ─────────────────────────────────────────────────────────────────────────
+  const [now, setNow] = useState(Date.now());
   useEffect(()=>{
-    Promise.all([api.get("/api/assets"),api.get("/api/maintenance")])
+    const id = setInterval(()=>setNow(Date.now()), 60000);
+    return ()=>clearInterval(id);
+  },[]);
+
+  useEffect(()=>{
+    Promise.all([api.get("/api/assets"), api.get("/api/maintenance")])
       .then(([a,m])=>{ setNotifAssets(Array.isArray(a.data)?a.data:[]); setNotifMaint(Array.isArray(m.data)?m.data:[]); })
       .catch(()=>{});
   },[]);
@@ -1345,11 +1402,11 @@ function AdminAuditLogsInner() {
 
   return (
     <div className="flex min-h-screen" style={{background:"linear-gradient(135deg,#f0f0ff 0%,#f5f9ff 50%,#f0fff8 100%)"}}>
-      <Sidebar mobileOpen={open} onClose={()=>setOpen(false)}/>
+      <Sidebar mobileOpen={sidebarOpen} onClose={()=>setSidebarOpen(false)}/>
       <div className="flex flex-col flex-1 min-w-0">
-        <Navbar onMenuToggle={()=>setOpen(o=>!o)} notifications={notifications}/>
+        <Navbar onMenuToggle={()=>setSidebarOpen(o=>!o)} notifications={notifications} now={now}/>
         <main className="flex-1 p-3 sm:p-4 lg:p-6 overflow-auto">
-          <AuditLogsContent/>
+          <AuditLogsContent now={now}/>
         </main>
       </div>
     </div>
