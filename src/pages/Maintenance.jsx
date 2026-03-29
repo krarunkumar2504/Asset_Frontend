@@ -1,21 +1,20 @@
 // ─────────────────────────────────────────────────────────────
-// Maintenance.jsx — v4.1  Mobile Notification Fix + 30s Timeout
+// Maintenance.jsx — v4.2  Admin Sidebar + Mobile Notification Fix + 30s Timeout
 //
 // ═══════════════════════════════════════════════════════════
-// CHANGES IN THIS VERSION (applied from Assets.jsx v4.0)
+// CHANGES IN THIS VERSION
 // ═══════════════════════════════════════════════════════════
 //
-// 1. MOBILE NOTIFICATION FIX  (matches Assets.jsx v4.0)
-//    - Old approach used `right: computedRight` with wide fixed width.
-//      On phones this pushed the dropdown off-screen to the left.
-//    - New approach switches to LEFT positioning:
-//        left = bellRight - dropW, clamped to Math.max(8px, ...)
-//      so it can never go off the left edge.
-//    - Width clamped to screenWidth - 16px — fits any phone.
+// 1. ADMIN SIDEBAR ITEMS  (matches Reports.jsx)
+//    - Added ADMIN_NAV_ITEMS constant with Create Employee,
+//      Manage Employees, Audit Logs entries.
+//    - SidebarContent now renders an "Admin" section below
+//      the "Main" nav when user.role === "Admin".
 //
-// 2. TIMEOUT INCREASED TO 30 SECONDS  (matches Assets.jsx v4.0)
-//    - Render.com free tier cold-starts take 15–20 s after inactivity.
-//    - Old 8 s timeout expired before the server woke up.
+// 2. MOBILE NOTIFICATION FIX  (matches Assets.jsx v4.0)
+//    - Uses left-anchored positioning clamped to screen margins.
+//
+// 3. TIMEOUT INCREASED TO 30 SECONDS  (matches Assets.jsx v4.0)
 //    - Error toast now tells user to wait 20 s and retry.
 //
 // ALL PREVIOUS FIXES RETAINED
@@ -28,15 +27,10 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { createPortal } from "react-dom";
 import axios from "axios";
 
-// ─────────────────────────────────────────────────────────────
-// AXIOS INSTANCE
-// TIMEOUT FIX: increased from 8000 → 30000 ms
-// Render.com free tier cold-starts can take 15–20 s after inactivity.
-// ─────────────────────────────────────────────────────────────
 const api = axios.create({
   baseURL: "https://assest-management-system.onrender.com/",
   headers: { "Content-Type": "application/json", Accept: "application/json" },
-  timeout: 30000,   // 30 s — Render.com free tier cold-starts can take 15-20 s
+  timeout: 30000,
 });
 
 const NAV_ITEMS = [
@@ -44,6 +38,13 @@ const NAV_ITEMS = [
   { label: "Assets",      icon: "📦", badge: null, path: "/assets"      },
   { label: "Maintenance", icon: "🔧", badge: null, path: "/maintenance" },
   { label: "Reports",     icon: "📊", badge: null, path: "/reports"     },
+];
+
+// ── Admin nav items (same as Reports.jsx) ───────────────────
+const ADMIN_NAV_ITEMS = [
+  { label: "Create Employee",  icon: "👤", path: "/create-employee"  },
+  { label: "Manage Employees", icon: "🏢", path: "/admin/employees"  },
+  { label: "Audit Logs",       icon: "📜", path: "/audit-logs"       },
 ];
 
 const EMPTY_FORM = {
@@ -108,28 +109,18 @@ const BAR_GRADIENTS = [
   "linear-gradient(90deg,#10b981,#6ee7b7)",
 ];
 
-// ─────────────────────────────────────────────────────────────
-// ROLE TITLE FIX — derives the navbar label from user.role
-// ─────────────────────────────────────────────────────────────
 function getDashboardLabel(user) {
   const role = (user.role ?? "").trim();
   if (!role) return "Dashboard";
   return `${role} Dashboard`;
 }
 
-// ─────────────────────────────────────────────────────────────
-// ASSET NAME FIX — resolveAssetName (for table rows, charts, etc.)
-// ─────────────────────────────────────────────────────────────
 function resolveAssetName(record, assetMap) {
   if (record.assetName && record.assetName.trim()) return record.assetName.trim();
   if (record.assetId   && assetMap[record.assetId]) return assetMap[record.assetId];
   return `Asset #${record.assetId ?? "?"}`;
 }
 
-// ─────────────────────────────────────────────────────────────
-// ASSET NAME FIX - NOTIF
-// resolveNotifAssetName — same logic but named separately for clarity.
-// ─────────────────────────────────────────────────────────────
 function resolveNotifAssetName(record, assetMap) {
   if (record.assetName && record.assetName.trim()) return record.assetName.trim();
   if (record.assetId   && assetMap[record.assetId]) return assetMap[record.assetId];
@@ -207,14 +198,7 @@ function buildNotifications(assets, records, assetMap = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// NOTIFICATION DROPDOWN — MOBILE FIX (matches Assets.jsx v4.0)
-//
-// Strategy: fixed width 300px, left-aligned from bell button but
-// clamped so it never goes off the LEFT edge of the screen.
-// On very small phones (<316px) it stretches edge-to-edge with 8px margins.
-//
-// Old approach: right: computedRight — pushed dropdown off-screen left on phones.
-// New approach: left = bellRight - dropW, clamped to Math.max(8, ...)
+// NOTIFICATION DROPDOWN — MOBILE FIX
 // ─────────────────────────────────────────────────────────────
 function NotificationDropdown({ notifications, anchorRect, onClose }) {
   const TYPE_STYLE = {
@@ -224,18 +208,15 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
   };
 
   const screenW   = window.innerWidth;
-  const MARGIN    = 8;                                      // min gap from screen edge
-  const dropW     = Math.min(300, screenW - MARGIN * 2);   // never wider than screen
-
-  // Ideal: right edge of dropdown aligns with right edge of bell button
+  const MARGIN    = 8;
+  const dropW     = Math.min(300, screenW - MARGIN * 2);
   const bellRight     = anchorRect ? anchorRect.right : screenW - MARGIN;
-  // left = bellRight - dropW, but clamp so it never goes < MARGIN
   const computedLeft  = Math.max(MARGIN, bellRight - dropW);
 
   const style = {
     position:     "fixed",
     top:          (anchorRect?.bottom ?? 60) + 8,
-    left:         computedLeft,          // ← LEFT not RIGHT — mobile fix
+    left:         computedLeft,
     width:        dropW,
     zIndex:       9999,
     background:   "#fff",
@@ -357,7 +338,6 @@ function MaintenanceAiPanel({ record, assetMap, assetList, onClear }) {
       usefulLifeYears: Number(fullAsset?.usefulLifeYears) || 5,
       maintenanceCost: parseCost(r.cost) > 0 ? parseCost(r.cost) : Math.round(currentVal * 0.3),
     };
-    console.log("MaintenanceAI payload →", payload);
     try {
       const res  = await api.post("/api/ai/recommendation", payload);
       const text = typeof res.data === "string"
@@ -366,10 +346,9 @@ function MaintenanceAiPanel({ record, assetMap, assetList, onClear }) {
       setAiResult(text);
       runTypewriter(text);
     } catch (err) {
-      console.error("AI error:", err);
-      if      (err.code === "ERR_NETWORK")       setAiError("Cannot reach backend — is Spring Boot running on port 8080?");
-      else if (err.code === "ECONNABORTED")      setAiError("Server is waking up (Render cold start — please wait 20 s and retry).");
-      else if (err.response?.status === 404)     setAiError("Endpoint not found — check /api/ai/recommendation in your backend.");
+      if      (err.code === "ERR_NETWORK")   setAiError("Cannot reach backend — is Spring Boot running on port 8080?");
+      else if (err.code === "ECONNABORTED")  setAiError("Server is waking up (Render cold start — please wait 20 s and retry).");
+      else if (err.response?.status === 404) setAiError("Endpoint not found — check /api/ai/recommendation in your backend.");
       else setAiError(err.response?.data?.message ?? err.message ?? "Request failed.");
     } finally { setLoading(false); }
   };
@@ -481,14 +460,38 @@ function MaintenanceAiPanel({ record, assetMap, assetList, onClear }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// SIDEBAR CONTENT
+// SIDEBAR CONTENT — updated with Admin section
 // ─────────────────────────────────────────────────────────────
 function SidebarContent({ onNavigate }) {
   const navigate    = useNavigate();
   const location    = useLocation();
   const user        = getStoredUser();
+  const isAdmin     = user.role === "Admin";
   const displayName = getUserDisplayName(user);
-  const handleNav   = (path) => { navigate(path); if (onNavigate) onNavigate(); };
+
+  const handleNav = (path) => { navigate(path); if (onNavigate) onNavigate(); };
+
+  const NavBtn = ({ item }) => {
+    const isActive = location.pathname === item.path ||
+      (item.path !== "/dashboard" && location.pathname.startsWith(item.path));
+    return (
+      <button
+        onClick={() => handleNav(item.path)}
+        className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative
+          ${isActive ? "text-white" : "text-indigo-300 hover:bg-white/5 hover:text-indigo-100"}`}
+        style={isActive ? { background: "linear-gradient(90deg,rgba(99,102,241,0.5),rgba(20,184,166,0.3))", boxShadow: "0 0 20px rgba(99,102,241,0.3)" } : {}}>
+        {isActive && (
+          <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full"
+            style={{ background: "linear-gradient(180deg,#818cf8,#34d399)" }} />
+        )}
+        <span className="text-sm w-4 text-center">{item.icon}</span>
+        <span className="flex-1">{item.label}</span>
+        {item.badge && (
+          <span className="text-xs bg-indigo-800 text-indigo-200 px-1.5 py-0.5 rounded-full">{item.badge}</span>
+        )}
+      </button>
+    );
+  };
 
   return (
     <div className="flex flex-col h-full py-6 px-3.5">
@@ -503,31 +506,26 @@ function SidebarContent({ onNavigate }) {
 
       <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mb-2">Main</p>
       <nav className="flex flex-col gap-1">
-        {NAV_ITEMS.map((item) => {
-          const isActive = location.pathname.startsWith(item.path);
-          return (
-            <button key={item.label} onClick={() => handleNav(item.path)}
-              className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium w-full text-left transition-all duration-200 relative
-                ${isActive ? "text-white" : "text-indigo-300 hover:bg-white/5 hover:text-indigo-100"}`}
-              style={isActive ? { background: "linear-gradient(90deg,rgba(99,102,241,0.5),rgba(20,184,166,0.3))", boxShadow: "0 0 20px rgba(99,102,241,0.3)" } : {}}>
-              {isActive && (
-                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/5 rounded-r-full"
-                  style={{ background: "linear-gradient(180deg,#818cf8,#34d399)" }} />
-              )}
-              <span className="text-sm w-4 text-center">{item.icon}</span>
-              <span className="flex-1">{item.label}</span>
-              {item.badge && (
-                <span className="text-xs bg-indigo-800 text-indigo-200 px-1.5 py-0.5 rounded-full">{item.badge}</span>
-              )}
-            </button>
-          );
-        })}
+        {NAV_ITEMS.map((item) => <NavBtn key={item.label} item={item} />)}
       </nav>
 
+      {/* Admin section — visible only for Admin role */}
+      {isAdmin && (
+        <>
+          <p className="text-indigo-500 text-xs font-semibold tracking-widest uppercase px-2 mt-5 mb-2">Admin</p>
+          <nav className="flex flex-col gap-1">
+            {ADMIN_NAV_ITEMS.map((item) => <NavBtn key={item.label} item={item} />)}
+          </nav>
+        </>
+      )}
+
       <div className="mt-auto p-3 rounded-xl border border-white/10 bg-white/5">
-        <p className="text-xs text-emerald-400 font-semibold tracking-wide uppercase">{user.role ?? "Administrator"}</p>
+        <p className="text-xs font-semibold tracking-wide uppercase"
+          style={{ color: isAdmin ? "#34d399" : "#a5b4fc" }}>
+          {user.role ?? "Administrator"}
+        </p>
         <p className="text-sm text-indigo-100 font-medium mt-0.5 truncate">{displayName}</p>
-        <p className="text-xs text-indigo-600 mt-0.5">v4.1.0 — Pro Plan</p>
+        <p className="text-xs text-indigo-600 mt-0.5">v4.2.0 — Pro Plan</p>
       </div>
     </div>
   );
