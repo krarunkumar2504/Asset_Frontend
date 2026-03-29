@@ -1,21 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// AdminEmployeeManagement.jsx  —  UPDATED VERSION
+// AdminEmployeeManagement.jsx  —  FULLY UPDATED VERSION
 // ═══════════════════════════════════════════════════════════════════════════
-//
-// UPDATES IN THIS VERSION:
-//
-// [UPD-1] joined_date — fetched and displayed everywhere (table, view modal,
-//         create form). normaliseEmp reads e.joined_date from DB correctly.
-//
-// [UPD-2] Notifications — uses full buildNotifications() same as Dashboard.
-//         Includes overdue maintenance, assets under maintenance, pending
-//         tasks, inactive assets, and system status.
-//
-// [UPD-3] Status column — correctly fetched from DB (status field added via
-//         ALTER TABLE employees ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'Active')
-//
-// All previous ROOT-FIX-* fixes from original version are retained.
-//
+// KEY FIXES IN THIS VERSION:
+// • joined_date: fetched + displayed in table, view modal, create/edit forms
+// • account_since (created_at): fetched + displayed everywhere
+// • X-Performed-By header sent on every mutating API call so audit log
+//   records the actual logged-in admin name, not a fallback
+// • DELETE sends X-Performed-By so audit DELETE count increments correctly
+// • Employee directory table UI improved (cleaner card-style rows)
+// • Notifications: full buildNotifications() identical to Dashboard
 // ═══════════════════════════════════════════════════════════════════════════
 
 import {
@@ -26,14 +19,14 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { createPortal } from "react-dom";
 import axios from "axios";
 
-// ─── Axios ───────────────────────────────────────────────────────────────────
+// ─── Axios ────────────────────────────────────────────────────────────────────
 const api = axios.create({
   baseURL: "https://assest-management-system.onrender.com/",
   headers: { "Content-Type": "application/json", Accept: "application/json" },
   timeout: 12000,
 });
 
-// ─── Nav items ───────────────────────────────────────────────────────────────
+// ─── Nav items ────────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
   { label: "Dashboard",   icon: "▪",   path: "/dashboard"   },
   { label: "Assets",      icon: "📦",  path: "/assets"      },
@@ -93,22 +86,34 @@ function avatarColor(name) {
   return AV_COLORS[((name || "A").charCodeAt(0)) % AV_COLORS.length];
 }
 
-// ─── [UPD-1] normaliseEmp — reads joined_date from DB ────────────────────────
+// Returns the X-Performed-By value for API calls (admin's name or email)
+function getPerformedBy() {
+  const u = getStoredUser();
+  return u.employeeName || u.name || u.email || "Admin";
+}
+
+// ── normaliseEmp: maps every possible backend field shape ────────────────────
 function normaliseEmp(e) {
   const deptId =
-    e.department?.id  ??
-    e.departmentId    ??
-    e.department_id   ??
+    e.department?.id ??
+    e.departmentId   ??
+    e.department_id  ??
     null;
   const deptNameFromObj =
     e.department?.departmentName ??
     e.department?.department_name ??
     null;
 
-  // joined_date: prefer explicit joined_date/joinedDate, fallback to created_at
+  // joined_date: Spring Boot returns camelCase "joinedDate" (LocalDate → "2024-03-01")
   const joinedDate =
-    e.joinedDate    ??  // Spring Boot camelCase
-    e.joined_date   ??  // DB snake_case
+    e.joinedDate    ??   // Spring Boot / Jackson camelCase
+    e.joined_date   ??   // raw snake_case
+    null;
+
+  // created_at: Spring Boot serialises LocalDateTime as "createdAt"
+  const createdAt =
+    e.createdAt   ??
+    e.created_at  ??
     null;
 
   return {
@@ -116,14 +121,14 @@ function normaliseEmp(e) {
     employeeName:   e.employeeName   || e.employee_name   || "",
     departmentId:   deptId,
     departmentName: deptNameFromObj,
-    createdAt:      e.createdAt      || e.created_at      || null,
-    joinedDate,                                             // ← [UPD-1] explicit
-    status:         e.status         || "Active",
-    password:       e.password       || "",
+    joinedDate,
+    createdAt,
+    status:   e.status   || "Active",
+    password: e.password || "",
   };
 }
 
-// ─── [UPD-2] Notification helpers — same as Dashboard ────────────────────────
+// ─── Notification helpers ─────────────────────────────────────────────────────
 function deriveStatus(dt) {
   if (!dt) return "Completed";
   const d = (new Date(dt) - new Date()) / 86400000;
@@ -209,7 +214,12 @@ function ToastProvider({ children }) {
     setToasts(p => { const n = [...p, { id, type, title, message }]; return n.length > 4 ? n.slice(-4) : n; });
   }, []);
   const remove = useCallback(id => setToasts(p => p.filter(t => t.id !== id)), []);
-  const toast = useMemo(() => ({ success:(t,m)=>add("success",t,m), error:(t,m)=>add("error",t,m), warning:(t,m)=>add("warning",t,m), info:(t,m)=>add("info",t,m) }), [add]);
+  const toast = useMemo(() => ({
+    success: (t, m) => add("success", t, m),
+    error:   (t, m) => add("error",   t, m),
+    warning: (t, m) => add("warning", t, m),
+    info:    (t, m) => add("info",    t, m),
+  }), [add]);
   return (
     <ToastCtx.Provider value={{ toast }}>
       {children}
@@ -270,7 +280,7 @@ function NotificationDropdown({ notifications, anchorRect, onClose }) {
   );
 }
 
-// ─── SIDEBAR ─────────────────────────────────────────────────────────────────
+// ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 function SidebarContent({ onNavigate }) {
   const navigate = useNavigate(), location = useLocation(), user = getStoredUser();
   const isAdmin = user.role === "Admin";
@@ -395,8 +405,8 @@ function StatusBadge({ status }) {
 function SkeletonRow() {
   return (
     <tr className="animate-pulse">
-      {[32,40,120,100,60,70,80,70,80,90,60].map((w,i) => (
-        <td key={i} className="px-3 py-3"><div className="h-3.5 bg-slate-100 rounded-full" style={{ width:w }} /></td>
+      {[32,40,150,130,70,80,90,80,90,100,60].map((w,i) => (
+        <td key={i} className="px-3 py-3.5"><div className="h-3.5 bg-slate-100 rounded-full" style={{ width:w }} /></td>
       ))}
     </tr>
   );
@@ -423,7 +433,7 @@ function StatCard({ icon, label, value, sub, gradient, glowColor, trend }) {
   );
 }
 
-// ─── VIEW MODAL — [UPD-1] shows joined_date from DB ──────────────────────────
+// ─── VIEW MODAL ───────────────────────────────────────────────────────────────
 function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
   const deptName = deptMap[employee?.departmentId] || employee?.departmentName || "—";
   return createPortal(
@@ -455,15 +465,14 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
             {[
               { label:"Employee ID",   value:`#${employee?.id||"—"}` },
               { label:"Department",    value:deptName },
-              // [UPD-1] Joined Date from DB joined_date column
-              { label:"Joined Date",   value:fmtDate(employee?.joinedDate) },
-              { label:"Account Since", value:fmtFull(employee?.createdAt) },
               { label:"Role",          value:employee?.role||"—" },
               { label:"Status",        value:employee?.status||"Active" },
+              { label:"Joined Date",   value:fmtDate(employee?.joinedDate) },
+              { label:"Account Since", value:fmtFull(employee?.createdAt) },
             ].map(f => (
               <div key={f.label} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-0.5">{f.label}</p>
-                <p className="text-sm font-bold text-slate-800">{f.value}</p>
+                <p className="text-sm font-bold text-slate-800 break-words">{f.value}</p>
               </div>
             ))}
           </div>
@@ -480,7 +489,7 @@ function ViewModal({ employee, deptMap, assignedAssets, onClose }) {
                       <div className="flex-1 min-w-0">
                         <p className="text-xs font-semibold text-indigo-800 truncate">{a.assetName||a.asset_name||`Asset #${a.assetId||a.asset_id||"?"}`}</p>
                         {a.assignmentStatus && <p className="text-xs text-indigo-400 capitalize">{a.assignmentStatus}</p>}
-                        {a.assignedDate && <p className="text-xs text-slate-400">Assigned: {fmtDate(a.assignedDate || a.assigned_date)}</p>}
+                        {(a.assignedDate||a.assigned_date) && <p className="text-xs text-slate-400">Assigned: {fmtDate(a.assignedDate||a.assigned_date)}</p>}
                       </div>
                     </div>
                   ))}
@@ -506,9 +515,10 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
     departmentId: employee?.departmentId != null ? String(employee.departmentId) : "",
     status:       employee?.status       || "Active",
     password:     "",
-    // [UPD-1] edit joined_date too
-    joinedDate:   employee?.joinedDate
-      ? (typeof employee.joinedDate === "string" ? employee.joinedDate.split("T")[0] : "")
+    joinedDate: employee?.joinedDate
+      ? (typeof employee.joinedDate === "string"
+          ? employee.joinedDate.split("T")[0]
+          : String(employee.joinedDate))
       : "",
   });
   const [showPass, setShowPass] = useState(false);
@@ -568,7 +578,6 @@ function EditModal({ employee, departments, onSave, onClose, loading }) {
               {departments.map(d => <option key={d.id} value={String(d.id)}>{d.departmentName||d.department_name}</option>)}
             </select>
           </div>
-          {/* [UPD-1] Joined Date edit */}
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Joined Date</label>
             <input type="date" value={form.joinedDate} onChange={e => set("joinedDate",e.target.value)}
@@ -641,9 +650,9 @@ function AccessDenied() {
 // ═══════════════════════════════════════════════════════════════════════════
 function EmployeeManagementContent() {
   const { toast } = useToast();
-  const [employees,   setEmployees]   = useState([]);
-  const [departments, setDepartments] = useState([]);
-  const [loading,     setLoading]     = useState(true);
+  const [employees,    setEmployees]   = useState([]);
+  const [departments,  setDepartments] = useState([]);
+  const [loading,      setLoading]     = useState(true);
   const [search,       setSearch]      = useState("");
   const [filterRole,   setFilterRole]  = useState("All");
   const [filterStatus, setFilterStatus]= useState("All");
@@ -659,7 +668,6 @@ function EmployeeManagementContent() {
   const [showBulkConfirm, setShowBulkConfirm] = useState(false);
   const [bulkDelLoading,  setBulkDelLoading]  = useState(false);
   const [showCreate,      setShowCreate]      = useState(false);
-  // [UPD-1] create form includes joinedDate
   const [createForm, setCreateForm] = useState({
     employeeName:"", email:"", password:"", role:"Employee", departmentId:"", joinedDate:""
   });
@@ -683,7 +691,7 @@ function EmployeeManagementContent() {
       ]);
       const rawEmps  = Array.isArray(empRes.data)  ? empRes.data  : [];
       const rawDepts = Array.isArray(deptRes.data) ? deptRes.data : [];
-      setEmployees(rawEmps.map(normaliseEmp).sort((a, b) => a.id - b.id));
+      setEmployees(rawEmps.map(normaliseEmp).sort((a, b) => (a.id - b.id)));
       setDepartments(rawDepts);
     } catch (err) {
       toast.error("Load Failed", err.message || "Could not fetch data.");
@@ -695,14 +703,14 @@ function EmployeeManagementContent() {
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
   const stats = useMemo(() => ({
-    total:   employees.length,
-    active:  employees.filter(e => (e.status || "Active") === "Active").length,
-    removed: employees.filter(e => e.status === "Removed").length,
-    admins:  employees.filter(e => e.role === "Admin").length,
+    total:    employees.length,
+    active:   employees.filter(e => (e.status || "Active") === "Active").length,
+    removed:  employees.filter(e => e.status === "Removed").length,
+    admins:   employees.filter(e => e.role === "Admin").length,
   }), [employees]);
 
   const filtered = useMemo(() => employees.filter(e => {
-    const q      = search.toLowerCase();
+    const q = search.toLowerCase();
     const matchQ = !q || (e.employeeName||"").toLowerCase().includes(q) || (e.email||"").toLowerCase().includes(q);
     const matchR = filterRole   === "All" || e.role === filterRole;
     const matchS = filterStatus === "All" || (e.status || "Active") === filterStatus;
@@ -732,12 +740,12 @@ function EmployeeManagementContent() {
         role:          form.role,
         status:        form.status,
         department: form.departmentId ? { id: Number(form.departmentId) } : null,
-        // [UPD-1] send joined_date to backend
-        joinedDate:  form.joinedDate || null,
-        joined_date: form.joinedDate || null,
+        joinedDate: form.joinedDate || null,
       };
       if (form.password?.trim()) payload.password = form.password.trim();
-      await api.put(`/api/employees/${editEmp.id}`, payload);
+      await api.put(`/api/employees/${editEmp.id}`, payload, {
+        headers: { "X-Performed-By": getPerformedBy() },
+      });
       toast.success("Updated", `${form.employeeName} updated successfully.`);
       setEditEmp(null);
       await fetchAll();
@@ -753,7 +761,9 @@ function EmployeeManagementContent() {
     const target = deleteEmp;
     setDeleteEmp(null);
     try {
-      await api.delete(`/api/employees/${target.id}`);
+      await api.delete(`/api/employees/${target.id}`, {
+        headers: { "X-Performed-By": getPerformedBy() },
+      });
       toast.success("Removed", `${target.employeeName} permanently deleted.`);
     } catch (err) {
       const status = err.response?.status;
@@ -763,7 +773,7 @@ function EmployeeManagementContent() {
       toast.error("Delete Failed", msg);
     } finally {
       setActionLoading(false);
-      await fetchAll(); // always re-sync from server
+      await fetchAll();
     }
   };
 
@@ -771,8 +781,14 @@ function EmployeeManagementContent() {
     setBulkDelLoading(true);
     const ids = [...selected];
     let ok = 0;
+    const performer = getPerformedBy();
     for (const id of ids) {
-      try { await api.delete(`/api/employees/${id}`); ok++; } catch { /* skip */ }
+      try {
+        await api.delete(`/api/employees/${id}`, {
+          headers: { "X-Performed-By": performer },
+        });
+        ok++;
+      } catch { /* skip */ }
     }
     toast[ok > 0 ? "success" : "error"](
       ok > 0 ? "Bulk Remove Done" : "Bulk Remove Failed",
@@ -803,9 +819,9 @@ function EmployeeManagementContent() {
         password,
         role,
         department:  { id: Number(departmentId) },
-        // [UPD-1] send joined_date on create
         joinedDate:  createForm.joinedDate || null,
-        joined_date: createForm.joinedDate || null,
+      }, {
+        headers: { "X-Performed-By": getPerformedBy() },
       });
       toast.success("Employee Created", `${employeeName} added to the system.`);
       setShowCreate(false);
@@ -821,14 +837,13 @@ function EmployeeManagementContent() {
   };
 
   const exportCSV = () => {
-    // [UPD-1] includes Joined Date column
     const headers = ["ID","Name","Email","Role","Department","Status","Joined Date","Account Since"];
-    const rows    = filtered.map(e => [
+    const rows = filtered.map(e => [
       e.id, e.employeeName, e.email, e.role,
       deptMap[e.departmentId]||"—",
       e.status||"Active",
-      fmtDate(e.joinedDate),        // ← [UPD-1]
-      fmtDate(e.createdAt),
+      fmtDate(e.joinedDate),
+      fmtFull(e.createdAt),
     ]);
     const csv = [headers,...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
     const a = document.createElement("a");
@@ -849,7 +864,7 @@ function EmployeeManagementContent() {
     departments.map(d => ({ id:d.id, name:d.departmentName||d.department_name||`Dept #${d.id}` })),
   [departments]);
 
-  // ─── RENDER ──────────────────────────────────────────────────────────────
+  // ── RENDER ──────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-5 pb-6">
 
@@ -896,19 +911,19 @@ function EmployeeManagementContent() {
         )}
       </div>
 
-      {/* TABLE */}
+      {/* ── TABLE ── */}
       <div className="bg-white rounded-2xl border border-indigo-50 overflow-hidden" style={{ boxShadow:"0 2px 12px rgba(79,70,229,.06)" }}>
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-indigo-50/80" style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
           <span className="text-sm font-bold text-indigo-950">Employee Directory</span>
           <span className="text-xs text-slate-400">{filtered.length} result{filtered.length!==1?"s":""}</span>
         </div>
         <div style={{ overflowX:"auto" }}>
-          <table className="w-full text-sm" style={{ minWidth:1000 }}>
+          <table className="w-full text-sm" style={{ minWidth:1100 }}>
             <thead>
               <tr style={{ background:"linear-gradient(90deg,#f8f8ff,#f0fdfa)" }}>
                 <th className="px-3 py-3 w-8"><Checkbox checked={allPageSel} onChange={toggleAll} indeterminate={somePageSel} /></th>
-                {["#ID","Profile","Email","Password","Role","Department","Status","Joined Date","Account Since","Actions"].map(h => (
-                  <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">{h}</th>
+                {["#","Employee","Email","Password","Role","Department","Status","Joined Date","Account Since","Actions"].map(h => (
+                  <th key={h} className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -926,37 +941,90 @@ function EmployeeManagementContent() {
                   : paged.map((emp, idx) => {
                       const isChecked = selected.has(emp.id);
                       const deptName = deptMap[emp.departmentId] || emp.departmentName || "—";
+                      const rowBg = isChecked
+                        ? "rgba(238,242,255,0.9)"
+                        : idx % 2 === 1 ? "rgba(248,250,252,0.7)" : "white";
                       return (
-                        <tr key={emp.id} className={`hover:bg-indigo-50/40 transition-colors border-b border-slate-50 ${isChecked?"bg-indigo-50/60":idx%2===1?"bg-slate-50/40":""}`}>
-                          <td className="px-3 py-3"><Checkbox checked={isChecked} onChange={()=>toggleSelect(emp.id)} /></td>
-                          <td className="px-3 py-3 text-xs font-mono text-indigo-400 font-bold">#{emp.id}</td>
-                          <td className="px-3 py-3">
+                        <tr key={emp.id}
+                          className="transition-colors border-b border-slate-50/80 hover:bg-indigo-50/40 group"
+                          style={{ background: rowBg }}>
+                          <td className="px-3 py-3.5"><Checkbox checked={isChecked} onChange={()=>toggleSelect(emp.id)} /></td>
+
+                          {/* ID */}
+                          <td className="px-3 py-3.5">
+                            <span className="text-xs font-mono font-bold text-indigo-400 bg-indigo-50 px-2 py-0.5 rounded-md">#{emp.id}</span>
+                          </td>
+
+                          {/* Profile */}
+                          <td className="px-3 py-3.5">
                             <div className="flex items-center gap-2.5">
-                              <div className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-xs font-black flex-shrink-0" style={{ background:avatarColor(emp.employeeName||"") }}>{empInitials(emp.employeeName||"")}</div>
-                              <span className="font-semibold text-slate-800 whitespace-nowrap text-xs">{emp.employeeName||"—"}</span>
+                              <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-xs font-black flex-shrink-0 shadow-sm" style={{ background:avatarColor(emp.employeeName||"") }}>
+                                {empInitials(emp.employeeName||"")}
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-xs font-bold text-slate-800 whitespace-nowrap">{emp.employeeName||"—"}</p>
+                                <p className="text-xs text-slate-400 truncate max-w-24 hidden xl:block">{emp.role||"Employee"}</p>
+                              </div>
                             </div>
                           </td>
-                          <td className="px-3 py-3 text-slate-500 text-xs whitespace-nowrap">{emp.email||"—"}</td>
-                          <td className="px-3 py-3 text-slate-400 text-xs font-mono tracking-widest">{emp.password ? "••••••" : <span className="text-slate-300 italic text-xs">not set</span>}</td>
-                          <td className="px-3 py-3"><RoleBadge role={emp.role||"Employee"} /></td>
-                          <td className="px-3 py-3">
-                            <span className="text-xs font-medium bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-md whitespace-nowrap">{deptName}</span>
+
+                          {/* Email */}
+                          <td className="px-3 py-3.5">
+                            <span className="text-xs text-slate-500 whitespace-nowrap">{emp.email||"—"}</span>
                           </td>
-                          <td className="px-3 py-3"><StatusBadge status={emp.status||"Active"} /></td>
-                          {/* [UPD-1] Joined Date column */}
-                          <td className="px-3 py-3 text-xs text-slate-600 whitespace-nowrap font-medium">
+
+                          {/* Password */}
+                          <td className="px-3 py-3.5">
+                            {emp.password
+                              ? <span className="text-slate-300 font-mono tracking-widest text-xs">••••••</span>
+                              : <span className="text-slate-200 italic text-xs">not set</span>}
+                          </td>
+
+                          {/* Role */}
+                          <td className="px-3 py-3.5"><RoleBadge role={emp.role||"Employee"} /></td>
+
+                          {/* Department */}
+                          <td className="px-3 py-3.5">
+                            <span className="inline-flex items-center gap-1 text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100 px-2 py-0.5 rounded-lg whitespace-nowrap">
+                              🏢 {deptName}
+                            </span>
+                          </td>
+
+                          {/* Status */}
+                          <td className="px-3 py-3.5"><StatusBadge status={emp.status||"Active"} /></td>
+
+                          {/* Joined Date */}
+                          <td className="px-3 py-3.5 whitespace-nowrap">
                             {emp.joinedDate ? (
-                              <span className="bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-md border border-emerald-100">{fmtDate(emp.joinedDate)}</span>
+                              <span className="inline-flex items-center gap-1 text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-100 px-2 py-0.5 rounded-lg">
+                                📅 {fmtDate(emp.joinedDate)}
+                              </span>
                             ) : (
-                              <span className="text-slate-300 italic">—</span>
+                              <span className="text-slate-300 italic text-xs">Not set</span>
                             )}
                           </td>
-                          <td className="px-3 py-3 text-xs text-slate-400 whitespace-nowrap">{fmtDate(emp.createdAt)}</td>
-                          <td className="px-3 py-3">
+
+                          {/* Account Since */}
+                          <td className="px-3 py-3.5 whitespace-nowrap">
+                            {emp.createdAt ? (
+                              <div>
+                                <p className="text-xs font-medium text-slate-600">{fmtDate(emp.createdAt)}</p>
+                                <p className="text-xs text-slate-300" style={{fontSize:"10px"}}>{fmtFull(emp.createdAt).split(",")[1]?.trim() || ""}</p>
+                              </div>
+                            ) : (
+                              <span className="text-slate-300 italic text-xs">—</span>
+                            )}
+                          </td>
+
+                          {/* Actions */}
+                          <td className="px-3 py-3.5">
                             <div className="flex items-center gap-1.5">
-                              <button onClick={()=>openView(emp)} title="View" className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-indigo-100 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">👁</button>
-                              <button onClick={()=>setEditEmp(emp)} title="Edit" className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-violet-100 bg-violet-50 text-violet-600 hover:bg-violet-100 transition-colors">✏️</button>
-                              <button onClick={()=>setDeleteEmp(emp)} title="Delete" className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-red-100 bg-red-50 text-red-500 hover:bg-red-100 transition-colors">🗑️</button>
+                              <button onClick={()=>openView(emp)} title="View Details"
+                                className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-indigo-100 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">👁</button>
+                              <button onClick={()=>setEditEmp(emp)} title="Edit Employee"
+                                className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-violet-100 bg-violet-50 text-violet-600 hover:bg-violet-100 transition-colors">✏️</button>
+                              <button onClick={()=>setDeleteEmp(emp)} title="Delete Employee"
+                                className="w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-red-100 bg-red-50 text-red-500 hover:bg-red-100 transition-colors">🗑️</button>
                             </div>
                           </td>
                         </tr>
@@ -966,6 +1034,8 @@ function EmployeeManagementContent() {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination */}
         {!loading && filtered.length > PAGE_SIZE && (
           <div className="flex items-center justify-between px-5 py-3 border-t border-indigo-50">
             <span className="text-xs text-slate-400">Page {page} of {totalPages} · {filtered.length} total</span>
@@ -989,8 +1059,8 @@ function EmployeeManagementContent() {
       </div>
 
       {/* MODALS */}
-      {viewEmp   && <ViewModal    employee={viewEmp}  deptMap={deptMap} assignedAssets={assignedAssets} onClose={()=>setViewEmp(null)} />}
-      {editEmp   && <EditModal    employee={editEmp}  departments={departments} onSave={handleEdit} onClose={()=>setEditEmp(null)} loading={actionLoading} />}
+      {viewEmp   && <ViewModal employee={viewEmp} deptMap={deptMap} assignedAssets={assignedAssets} onClose={()=>setViewEmp(null)} />}
+      {editEmp   && <EditModal employee={editEmp} departments={departments} onSave={handleEdit} onClose={()=>setEditEmp(null)} loading={actionLoading} />}
       {deleteEmp && <ConfirmDeleteModal employee={deleteEmp} onConfirm={handleDelete} onCancel={()=>setDeleteEmp(null)} loading={actionLoading} />}
 
       {/* Bulk delete confirm */}
@@ -1050,7 +1120,6 @@ function EmployeeManagementContent() {
                   </select>
                 </div>
               </div>
-              {/* [UPD-1] Joined Date in create form */}
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Joined Date</label>
                 <input type="date" value={createForm.joinedDate} onChange={e=>setCreateForm(p=>({...p,joinedDate:e.target.value}))}
@@ -1081,24 +1150,20 @@ function AdminEmployeeInner() {
   const [notifMaint,  setNotifMaint]  = useState([]);
 
   useEffect(() => {
-    // [UPD-2] same API calls as Dashboard for accurate notifications
     Promise.all([api.get("/api/assets"), api.get("/api/maintenance")])
       .then(([a, m]) => {
         setNotifAssets(Array.isArray(a.data) ? a.data : []);
-        setNotifMaint(Array.isArray(m.data) ? m.data : []);
+        setNotifMaint(Array.isArray(m.data)  ? m.data  : []);
       })
       .catch(() => {});
   }, []);
 
   const assetMap = useMemo(() => {
     const m = {};
-    notifAssets.forEach(a => {
-      if (a.id != null) m[a.id] = a.assetName ?? a.asset_name ?? `Asset #${a.id}`;
-    });
+    notifAssets.forEach(a => { if (a.id != null) m[a.id] = a.assetName ?? a.asset_name ?? `Asset #${a.id}`; });
     return m;
   }, [notifAssets]);
 
-  // [UPD-2] full buildNotifications — same as Dashboard
   const notifications = useMemo(() =>
     buildNotifications(notifAssets, notifMaint, assetMap),
   [notifAssets, notifMaint, assetMap]);
